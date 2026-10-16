@@ -2,8 +2,16 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.yeick010/italycheck",
   "title": "ItalyCheck",
-  "description": "Verify Italian public bodies by codice fiscale (IndicePA): name, PEC, address. Pay per call: x402, Base.",
-  "repository": { "url": "https://github.com/yeick010/italycheck", "source": "github" },
+  "description": "Italian public bodies by codice fiscale (IndicePA): name, PEC, address. Paid per call via x402.",
+  "repository": {
+    "url": "https://github.com/yeick010/italycheck",
+    "source": "github"
+  },
   "version": "0.2.0",
-  "remotes": [ { "type": "streamable-http", "url": "https://italycheck.italycheck.workers.dev/mcp" } ]
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://italycheck.italycheck.workers.dev/mcp"
+    }
+  ]
 }
