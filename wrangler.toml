@@ -1,0 +1,14 @@
+name = "italycheck"
+main = "src/worker.js"
+compatibility_date = "2026-10-01"
+compatibility_flags = ["nodejs_compat"]
+[vars]
+X402_NETWORK = "eip155:8453"   # Base mainnet
+PAY_TO = "0xde8380854ef9c926093832501d95a47f4c63fe7c"  # wallet Base di Yeison
+ENABLE_VAT = "0"  # VIES disattivato in attesa di parere legale
+FACILITATOR_URL = "https://x402.org/facilitator"  # usato solo se mancano le chiavi CDP (solo testnet)
+PRICE_VAT = "$0.01"
+PRICE_PA = "$0.005"
+
+[alias]
+"@x402/extensions/bazaar" = "./src/bazaar-shim.js"
