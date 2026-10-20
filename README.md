@@ -1,4 +1,6 @@
 # ItalyCheck (MVP)
+
+[![ItalyCheck MCP server](https://mcprush.com/badge/italycheck-mcp/card.svg)](https://mcprush.com/to/italycheck-mcp?ref=badge)
 Verifica fornitori pagata a chiamata dagli agenti AI. Solo fonti pubbliche gratuite. Pagamento x402 (USDC su Base).
 
 ## Endpoint
