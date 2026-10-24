@@ -26,6 +26,22 @@ class CachedFacilitatorClient extends HTTPFacilitatorClient {
 const PA_EXAMPLE = { status: "found", isPublicAdministration: true, source: "IndicePA open data (AgID), CC BY 4.0",
   entities: [{ codiceIPA: "c_g273", name: "Comune di Palermo", category: "Pubbliche Amministrazioni", ateco: "84.11.10", address: "Piazza Pretoria, 1 - Palazzo Delle Aquile 90133", website: "www.comune.palermo.it", pec: ["protocollo@cert.comune.palermo.it"] }] };
 
+// EURC (Circle, EIP-3009) per network. Addresses: https://developers.circle.com/stablecoins/eurc-contract-addresses
+// EIP-712 domain read on-chain (name()="EURC", version()="2", decimals()=6) on Base mainnet and Base Sepolia.
+const EURC = {
+  "eip155:8453": "0x60a3E35Cc302bFA44Cb288Bc5a4F316Fdb1adb42",
+  "eip155:84532": "0x808456652fdb597867f38412077A9182bf77359F",
+};
+
+// Payment options for a price: USDC first (default), then the same nominal amount in EURC when the network has it.
+export function acceptsFor(price, network, payTo, env = {}) {
+  const usdc = { scheme: "exact", price, network, payTo };
+  const eurc = EURC[network];
+  if (!eurc || env.DISABLE_EURC === "1") return [usdc];
+  const amount = String(Math.round(parseFloat(String(price).replace(/[^0-9.]/g, "")) * 1e6));
+  return [usdc, { scheme: "exact", price: { amount, asset: eurc, extra: { name: "EURC", version: "2" } }, network, payTo }];
+}
+
 export function buildX402(env = {}) {
   const network = env.X402_NETWORK || "eip155:8453"; // Base mainnet; testnet = eip155:84532
   const payTo = env.PAY_TO || "0xde8380854ef9c926093832501d95a47f4c63fe7c"; // Yeison's Base wallet
@@ -54,9 +70,9 @@ export function createApp(env = {}) {
   const app = new Hono();
 
   app.get("/", c => c.json({
-    name: "ItalyCheck", about: vatOn ? "Pay-per-call supplier verification for AI agents (EU VAT via VIES, Italian PA via IndicePA). Payment: x402, USDC on Base." : "Pay-per-call verification of Italian public administrations for AI agents (IndicePA). Payment: x402, USDC on Base.",
+    name: "ItalyCheck", about: vatOn ? "Pay-per-call supplier verification for AI agents (EU VAT via VIES, Italian PA via IndicePA). Payment: x402, USDC or EURC on Base." : "Pay-per-call verification of Italian public administrations for AI agents (IndicePA). Payment: x402, USDC or EURC on Base.",
     endpoints: [
-      { path: "/v1/pa", method: "GET", price: env.PRICE_PA || "$0.005", network, payment: "x402 exact, USDC", description: DESCRIPTIONS.pa },
+      { path: "/v1/pa", method: "GET", price: env.PRICE_PA || "$0.005", network, payment: "x402 exact, USDC or EURC (same nominal amount)", description: DESCRIPTIONS.pa },
       { path: "/mcp", method: "POST", price: "per tool (x402 over MCP)", description: "Remote MCP server (Streamable HTTP, stateless). Tool lookup_italian_pa is paid via x402 MCP payments; check_partita_iva_format is free." },
       { path: "/v1/vat/format", method: "GET", price: "free", description: "Offline Italian partita IVA format/checksum check, no external call." },
       ...(vatOn ? [{ path: "/v1/vat", price: env.PRICE_VAT || "$0.01", description: DESCRIPTIONS.vat }] : []),
@@ -72,7 +88,7 @@ export function createApp(env = {}) {
   if (env.DISABLE_PAYMENTS !== "1") {
     app.use(paymentMiddleware({
       ...(vatOn ? { "GET /v1/vat": { accepts: [{ scheme: "exact", price: env.PRICE_VAT || "$0.01", network, payTo }], description: DESCRIPTIONS.vat, mimeType: "application/json" } } : {}),
-      "GET /v1/pa": { accepts: [{ scheme: "exact", price: env.PRICE_PA || "$0.005", network, payTo }], description: DESCRIPTIONS.pa, mimeType: "application/json",
+      "GET /v1/pa": { accepts: acceptsFor(env.PRICE_PA || "$0.005", network, payTo, env), description: DESCRIPTIONS.pa, mimeType: "application/json",
         extensions: declareDiscoveryExtension({ method: "GET",
           input: { cf: "80016350821" },
           inputSchema: { properties: { cf: { type: "string", pattern: "^[0-9]{11}$", description: "11-digit codice fiscale of the Italian public entity" } }, required: ["cf"] },

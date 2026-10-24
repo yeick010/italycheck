@@ -10,7 +10,7 @@ const BASE = process.env.ITALYCHECK_URL || "http://localhost:8787";
 const LOCAL = process.env.ITALYCHECK_LOCAL === "1";
 async function remote(path) {
   const r = await fetch(BASE + path, { headers: process.env.X_PAYMENT ? { "PAYMENT-SIGNATURE": process.env.X_PAYMENT } : {} });
-  if (r.status === 402) return { paymentRequired: true, howToPay: "x402: retry with an x402-capable client (e.g. @x402/fetch) and a Base USDC wallet.", requirements: r.headers.get("payment-required") || (await r.text()) };
+  if (r.status === 402) return { paymentRequired: true, howToPay: "x402: retry with an x402-capable client (e.g. @x402/fetch) and a Base USDC or EURC wallet.", requirements: r.headers.get("payment-required") || (await r.text()) };
   return r.json();
 }
 const out = o => ({ content: [{ type: "text", text: JSON.stringify(o, null, 2) }] });

@@ -4,7 +4,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { createPaymentWrapper } from "@x402/mcp";
 import { z } from "zod";
-import { buildX402, DESCRIPTIONS } from "./app.js";
+import { buildX402, acceptsFor, DESCRIPTIONS } from "./app.js";
 import { ipaLookup, itChecksum, parseVat } from "./core.js";
 
 const out = o => ({ content: [{ type: "text", text: JSON.stringify(o) }] });
@@ -19,11 +19,12 @@ export async function handleMcp(req, env) {
     // Payment requirements are only needed for tool calls; tools/list stays cheap.
     const { network, payTo, server } = buildX402(env);
     await server.initialize();
-    const accepts = await server.buildPaymentRequirements({ scheme: "exact", network, payTo, price: env.PRICE_PA || "$0.005" });
+    const accepts = (await Promise.all(acceptsFor(env.PRICE_PA || "$0.005", network, payTo, env)
+      .map(o => server.buildPaymentRequirements(o)))).flat(); // USDC first, then EURC
     const paid = createPaymentWrapper(server, { accepts, resource: {
       url: new URL("/mcp#lookup_italian_pa", req.url).toString(), description: DESCRIPTIONS.pa.replace(" Input: ?cf=80016350821.", ""),
       mimeType: "application/json", serviceName: "ItalyCheck", tags: ["italy", "public-administration", "pec", "kyb", "e-invoicing"] } });
-    mcp.tool("lookup_italian_pa", DESCRIPTIONS.pa.replace(" Input: ?cf=80016350821.", "") + ` Costs ${env.PRICE_PA || "$0.005"} in USDC on Base via x402.`,
+    mcp.tool("lookup_italian_pa", DESCRIPTIONS.pa.replace(" Input: ?cf=80016350821.", "") + ` Costs ${env.PRICE_PA || "$0.005"} in USDC (or ${(env.PRICE_PA || "$0.005").replace("$", "")} EURC) on Base via x402.`,
       { cf: z.string().describe("11-digit codice fiscale, e.g. 80016350821") },
       paid(async ({ cf }) => out(await ipaLookup(cf))));
   }

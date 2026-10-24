@@ -1,13 +1,13 @@
 # ItalyCheck (MVP)
 
 [![ItalyCheck MCP server](https://mcprush.com/badge/italycheck-mcp/card.svg)](https://mcprush.com/to/italycheck-mcp?ref=badge)
-Verifica fornitori pagata a chiamata dagli agenti AI. Solo fonti pubbliche gratuite. Pagamento x402 (USDC su Base).
+Verifica fornitori pagata a chiamata dagli agenti AI. Solo fonti pubbliche gratuite. Pagamento x402 (USDC o EURC su Base).
 
 ## Endpoint
 | Path | Prezzo | Fonte |
 |---|---|---|
 | `GET /v1/vat?vat=IT00743110157` | $0.01 | EU VIES REST (passthrough in tempo reale, nessuna conservazione) |
-| `GET /v1/pa?cf=80016350821` | $0.005 | IndicePA, dataset "Enti" (AgID, CC BY 4.0, attribuzione obbligatoria) |
+| `GET /v1/pa?cf=80016350821` | $0.005 USDC o €0.005 EURC | IndicePA, dataset "Enti" (AgID, CC BY 4.0, attribuzione obbligatoria) |
 | `GET /v1/vat/format?vat=...` | gratis | checksum P.IVA offline |
 | `GET /` | gratis | catalogo con descrizioni per agenti |
 
@@ -40,3 +40,10 @@ Verifica fornitori pagata a chiamata dagli agenti AI. Solo fonti pubbliche gratu
 - MCP remoto: `POST /mcp` (Streamable HTTP, stateless). `lookup_italian_pa` si paga con x402 via MCP (`@x402/mcp`).
 - CPU: `src/bazaar-shim.js` (alias wrangler) salta la rivalidazione ajv per ogni richiesta. JWT CDP e risposta "supported" sono in cache come dati.
 - Vedi SUBMISSIONS.md per la discovery.
+
+## EURC (24/10/2026)
+- `/v1/pa` e il tool MCP `lookup_italian_pa` accettano anche EURC su Base, oltre a USDC. USDC resta la prima opzione (default) in `accepts`; EURC è la seconda, stesso importo nominale (0.005 EURC = `5000` unità, 6 decimali), stesso `payTo`.
+- EURC Base mainnet `0x60a3E35Cc302bFA44Cb288Bc5a4F316Fdb1adb42` (Circle: https://developers.circle.com/stablecoins/eurc-contract-addresses). Base Sepolia `0x808456652fdb597867f38412077A9182bf77359F`. Dominio EIP-712 letto on-chain: name `EURC`, version `2`.
+- Il facilitator CDP accetta ogni ERC-20 con EIP-3009 (USDC, EURC) sulle sue reti EVM: https://docs.cdp.coinbase.com/x402/support/faq
+- Nota per chi compra: i client `@x402` 2.28 con `spendControls` predefiniti accettano solo gli asset predefiniti (USDC). Per pagare in EURC servono `spendControls.allowedAssets` con EURC, oppure `allowedAssets: true`.
+- Per disattivare EURC: variabile `DISABLE_EURC="1"`.
