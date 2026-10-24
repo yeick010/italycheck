@@ -2,6 +2,17 @@ name = "italycheck"
 main = "src/worker.js"
 compatibility_date = "2026-10-01"
 compatibility_flags = ["nodejs_compat"]
+
+# Workers Logs (Free: 200k events/day, 3-day retention). 1 event/request: the console.log line in src/worker.js.
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+# Automatic invocation logs would store every request's full headers (incl. client IP and PAYMENT-SIGNATURE);
+# src/worker.js writes one privacy-safe structured line per request instead (also halves the event count).
+[observability.logs]
+invocation_logs = false
+
 [vars]
 X402_NETWORK = "eip155:8453"   # Base mainnet
 PAY_TO = "0xde8380854ef9c926093832501d95a47f4c63fe7c"  # wallet Base di Yeison

@@ -17,8 +17,8 @@ const isBrowser = req => (req.headers.get("accept") || "").includes("text/html")
 const hasPayment = req => req.headers.has("payment-signature") || req.headers.has("x-payment");
 const toResponse = e => new Response(e.body, { status: e.status, headers: e.headers });
 
-export async function paidRoute(req, env, ctx) {
-  if (req.method !== "GET" || hasPayment(req)) return createApp(env).fetch(req, env, ctx);
+export async function paidRoute(req, env, ctx, log = null) {
+  if (req.method !== "GET" || hasPayment(req)) return createApp(env, log).fetch(req, env, ctx);
   const key = (isBrowser(req) ? "h " : "j ") + req.url;
   const hit = unpaid402.get(key);
   if (hit) return toResponse(hit);
@@ -29,12 +29,45 @@ export async function paidRoute(req, env, ctx) {
   return toResponse(e);
 }
 
+function route(req, env, ctx, path, log) {
+  if (path === "/mcp") return handleMcp(req, env, log);
+  if (PAID.test(path)) return paidRoute(req, env, ctx, log);
+  freeApp ??= createApp({ ...env, DISABLE_PAYMENTS: "1", FREE_ONLY: "1" });
+  return freeApp.fetch(req, env, ctx);
+}
+
+// JSON-RPC method (+ tool name) of a POST /mcp body, read from a clone so the transport still gets the stream.
+// Batches report the first message. Bodies over 64 KB are not parsed (CPU).
+export async function mcpInfo(req) {
+  if (req.method !== "POST" || +(req.headers.get("content-length") || 0) > 65536) return {};
+  try {
+    let m = JSON.parse(await req.clone().text());
+    if (Array.isArray(m)) m = m[0];
+    const o = { mcp_method: typeof m?.method === "string" ? m.method.slice(0, 60) : null };
+    if (o.mcp_method === "tools/call") { o.tool = String(m.params?.name ?? "").slice(0, 60); o.has_mcp_payment = !!m.params?._meta?.["x402/payment"]; }
+    return o;
+  } catch { return { mcp_method: "unparsable" }; }
+}
+
+// One structured log line per request (Workers Logs indexes the fields). No IPs, headers, payment payloads or secrets.
+export function requestLog(req, path) {
+  const cf = req.cf || {};
+  return { path, method: req.method, has_payment_header: hasPayment(req),
+    ua: (req.headers.get("user-agent") || "").slice(0, 80), country: cf.country ?? null, colo: cf.colo ?? null };
+}
+
 export default {
-  fetch(req, env, ctx) {
+  async fetch(req, env, ctx) {
     const path = new URL(req.url).pathname;
-    if (path === "/mcp") return handleMcp(req, env);
-    if (PAID.test(path)) return paidRoute(req, env, ctx);
-    freeApp ??= createApp({ ...env, DISABLE_PAYMENTS: "1", FREE_ONLY: "1" });
-    return freeApp.fetch(req, env, ctx);
+    const log = requestLog(req, path);
+    if (path === "/mcp") Object.assign(log, await mcpInfo(req));
+    try {
+      const res = await route(req, env, ctx, path, log);
+      log.status = res.status;
+      return res;
+    } catch (e) {
+      log.status = 500; log.error = String(e?.message || e).slice(0, 160);
+      throw e;
+    } finally { console.log(log); }
   },
 };

@@ -9,6 +9,7 @@ import { z } from "zod";
 import { buildX402, acceptsFor, DESCRIPTIONS } from "./app.js";
 import { ipaLookup, itChecksum, parseVat } from "./core.js";
 import { PlainCache } from "./cache.js";
+import { readableMcpFailures } from "./payments.js";
 
 const out = o => ({ content: [{ type: "text", text: JSON.stringify(o) }] });
 const TTL = 3600_000;
@@ -26,7 +27,7 @@ async function getAccepts(env, network, payTo, server) {
   return v;
 }
 
-export async function handleMcp(req, env) {
+export async function handleMcp(req, env, log = null) {
   const mcp = new McpServer({ name: "italycheck", version: "0.2.0" });
   mcp.tool("check_partita_iva_format", "Free offline check of an Italian partita IVA (11 digits + check digit). Does not confirm registration.",
     { piva: z.string().describe("Italian partita IVA, e.g. 00743110157") },
@@ -41,7 +42,8 @@ export async function handleMcp(req, env) {
       async (args, extra) => {
         const unpaid = !extractPaymentFromMeta({ _meta: extra?._meta });
         if (unpaid) { const hit = mcpUnpaid.get(resource.url); if (hit) return structuredClone(hit); }
-        const { network, payTo, server } = buildX402(env);
+        const { network, payTo, server } = buildX402(env, log);
+        readableMcpFailures(server); // thrown verify/settle errors -> x402 payment-required result, not "Internal Server Error"
         await server.initialize();
         const accepts = await getAccepts(env, network, payTo, server);
         const res = await createPaymentWrapper(server, { accepts, resource })(handler)(args, extra);

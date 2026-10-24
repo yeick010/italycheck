@@ -72,3 +72,63 @@ try { validateBazaarRouteExtensions(createApp.__routes ?? {}); ok("bazaar valida
   ok("MCP unpaid tools/call: cache hit == miss", c1 === c2 && mcpUnpaid.size === 1 && pr1?.accepts?.length === 2 && pr1.accepts[0].extra?.name === "USDC" && pr1.accepts[1].extra?.name === "EURC", `accepts=${pr1?.accepts?.length}`);
   ok("MCP tools/list has both tools", l1.result?.tools?.map(x => x.name).join(",") === "check_partita_iva_format,lookup_italian_pa");
 }
+
+// Payment failures against a mock facilitator (CDP style: HTTP 400 {isValid:false} is thrown as VerifyError).
+{
+  const http = await import("node:http");
+  const { x402Client } = await import("@x402/core/client");
+  const { ExactEvmScheme } = await import("@x402/evm");
+  const { generatePrivateKey, privateKeyToAccount } = await import("viem/accounts");
+  const { handleMcp, _resetMcpCache } = await import("../src/remote-mcp.js");
+  const worker = (await import("../src/worker.js")).default;
+  const NET = "eip155:84532";
+  let mode = "verify400";
+  const REVERT = { isValid: false, invalidReason: "invalid_payload", invalidMessage: "contract call failed: unable to call contract: execution reverted", payer: "0x0000000000000000000000000000000000000001" };
+  const srv = http.createServer((q, s) => {
+    const send = (code, o) => { s.writeHead(code, { "content-type": "application/json" }); s.end(JSON.stringify(o)); };
+    q.resume(); q.on("end", () => {
+      if (q.url.endsWith("/supported")) return send(200, { kinds: [{ x402Version: 2, scheme: "exact", network: NET }], extensions: [], signers: {} });
+      if (q.url.endsWith("/verify")) return mode === "verify400" ? send(400, REVERT) : send(200, { isValid: true, payer: REVERT.payer });
+      if (q.url.endsWith("/settle")) return mode === "settle400" ? send(400, { success: false, errorReason: "invalid_transaction_state", errorMessage: "execution reverted", transaction: "", network: NET })
+        : send(200, { success: true, transaction: "0x" + "ab".repeat(32), network: NET, payer: REVERT.payer });
+      send(404, {});
+    });
+  });
+  await new Promise(r => srv.listen(0, r));
+  const env = { X402_NETWORK: NET, FACILITATOR_URL: `http://127.0.0.1:${srv.address().port}` };
+  const client = new x402Client().register(NET, new ExactEvmScheme(privateKeyToAccount(generatePrivateKey())));
+  const rpc = (meta, headers = {}) => new Request("https://italycheck.example/mcp", { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", ...headers },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "lookup_italian_pa", arguments: { cf: "80016350821" }, ...(meta ? { _meta: meta } : {}) } }) });
+  _resetMcpCache();
+  const pr = (await (await handleMcp(rpc(), env)).json()).result.structuredContent;
+  const meta = { "x402/payment": await client.createPaymentPayload(pr) };
+  const origErr = console.error; console.error = () => {};
+
+  const v = (await (await handleMcp(rpc(meta), env)).json()).result;
+  const ve = v.structuredContent;
+  ok("MCP verify 400 -> x402 payment-required result (not Internal Server Error)", v.isError === true && ve?.x402Version === 2 && ve.accepts?.length === 2 && ve.resource?.url?.endsWith("/mcp#lookup_italian_pa")
+    && JSON.parse(v.content[0].text).error === ve.error, ve?.error);
+  ok("MCP verify 400: readable reason", /^payment verification failed: insufficient funds or invalid authorization \(invalid_payload: .*execution reverted\)$/.test(ve?.error || ""));
+
+  const lines = []; const origLog = console.log; console.log = o => lines.push(o);
+  await (await worker.fetch(rpc(meta, { "user-agent": "x".repeat(200) }), env, {})).text();
+  console.log = origLog;
+  const L = lines.find(o => o?.path === "/mcp") || {};
+  ok("request log: mcp_method/tool/payment/ua (clone keeps body for transport)", L.method === "POST" && L.mcp_method === "tools/call" && L.tool === "lookup_italian_pa" && L.has_payment_header === false && L.has_mcp_payment === true
+    && L.status === 200 && L.payment === "failed" && /^verify: .*execution reverted/.test(L.payment_reason) && L.ua.length === 80 && !("ip" in L), JSON.stringify(L).slice(0, 200));
+
+  const h402 = await createApp(env).fetch(new Request("https://italycheck.example/v1/pa?cf=80016350821", { headers: { "payment-signature": Buffer.from(JSON.stringify(await client.createPaymentPayload(
+    JSON.parse(Buffer.from((await createApp(env).fetch(new Request("https://italycheck.example/v1/pa?cf=80016350821"))).headers.get("payment-required"), "base64").toString())))).toString("base64") } }), env);
+  const herr = JSON.parse(Buffer.from(h402.headers.get("payment-required") || "", "base64").toString() || "{}").error;
+  ok("HTTP /v1/pa verify 400 -> 402 with facilitator reason (unchanged)", h402.status === 402 && herr === "invalid_payload: contract call failed: unable to call contract: execution reverted", herr);
+
+  mode = "settle400";
+  const st = (await (await handleMcp(rpc(meta), env)).json()).result;
+  ok("MCP settle 400 -> x402 payment-required result with reason", st.isError === true && st.structuredContent?.accepts?.length === 2 && st.structuredContent.error === "Payment settlement failed: insufficient funds or invalid authorization (invalid_transaction_state: execution reverted)", st.structuredContent?.error);
+
+  mode = "ok";
+  const good = (await (await handleMcp(rpc(meta), env)).json()).result;
+  ok("MCP paid success path unchanged (tool result + payment-response meta)", !good.isError && JSON.parse(good.content[0].text).status === "found" && good._meta?.["x402/payment-response"]?.success === true);
+  console.error = origErr;
+  srv.close();
+}

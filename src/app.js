@@ -5,6 +5,7 @@ import { HTTPFacilitatorClient } from "@x402/core/server";
 import { createFacilitatorConfig } from "@coinbase/x402";
 import { declareDiscoveryExtension, bazaarResourceServerExtension } from "@x402/extensions/bazaar";
 import { viesCheck, ipaLookup, itChecksum, parseVat } from "./core.js";
+import { logPayment } from "./payments.js";
 
 export const DESCRIPTIONS = {
   vat: "Validate an EU VAT number (incl. Italian partita IVA) live against the European Commission VIES service. Use when an agent must confirm a supplier or customer is VAT-registered before invoicing, reverse-charge, onboarding or payment. Input: ?vat=IT00743110157 (country prefix optional, defaults to IT). Returns valid/invalid, registered name and address when the member state discloses them. Italian numbers are checksum-validated offline first.",
@@ -42,7 +43,7 @@ export function acceptsFor(price, network, payTo, env = {}) {
   return [usdc, { scheme: "exact", price: { amount, asset: eurc, extra: { name: "EURC", version: "2" } }, network, payTo }];
 }
 
-export function buildX402(env = {}) {
+export function buildX402(env = {}, log = null) {
   const network = env.X402_NETWORK || "eip155:8453"; // Base mainnet; testnet = eip155:84532
   const payTo = env.PAY_TO || "0xde8380854ef9c926093832501d95a47f4c63fe7c"; // Yeison's Base wallet
   // CDP facilitator (mainnet) when keys are present; otherwise x402.org testnet facilitator.
@@ -58,13 +59,13 @@ export function buildX402(env = {}) {
     } };
   }
   const facilitator = new CachedFacilitatorClient(facCfg);
-  const server = new x402ResourceServer(facilitator).register(network, new ExactEvmScheme());
+  const server = logPayment(new x402ResourceServer(facilitator).register(network, new ExactEvmScheme()), log);
 
   return { network, payTo, server };
 }
 
-export function createApp(env = {}) {
-  const { network, payTo, server } = buildX402(env);
+export function createApp(env = {}, log = null) {
+  const { network, payTo, server } = buildX402(env, log);
   server.registerExtension(bazaarResourceServerExtension);
   const vatOn = env.ENABLE_VAT === "1"; // VIES off by default pending legal review
   const app = new Hono();
