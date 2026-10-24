@@ -1,13 +1,30 @@
 // Remote MCP endpoint (Streamable HTTP, stateless) for the Worker: POST /mcp.
 // lookup_italian_pa is paid with x402 MCP payments (@x402/mcp); check_partita_iva_format is free.
+// The x402 server is built only when lookup_italian_pa is actually called with a payment. tools/list and
+// unpaid tools/call use plain data cached at module scope (accepts array, payment-required result).
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
-import { createPaymentWrapper } from "@x402/mcp";
+import { createPaymentWrapper, extractPaymentFromMeta } from "@x402/mcp";
 import { z } from "zod";
 import { buildX402, acceptsFor, DESCRIPTIONS } from "./app.js";
 import { ipaLookup, itChecksum, parseVat } from "./core.js";
+import { PlainCache } from "./cache.js";
 
 const out = o => ({ content: [{ type: "text", text: JSON.stringify(o) }] });
+const TTL = 3600_000;
+let acceptsCache = null; // { v, t, k }
+export const mcpUnpaid = new PlainCache(50, TTL); // resource URL -> payment-required tool result
+export const _resetMcpCache = () => { acceptsCache = null; mcpUnpaid.clear(); };
+
+async function getAccepts(env, network, payTo, server) {
+  const price = env.PRICE_PA || "$0.005";
+  const k = `${network}|${payTo}|${price}|${env.DISABLE_EURC || ""}`;
+  if (acceptsCache && acceptsCache.k === k && Date.now() - acceptsCache.t < TTL) return structuredClone(acceptsCache.v);
+  const v = (await Promise.all(acceptsFor(price, network, payTo, env)
+    .map(o => server.buildPaymentRequirements(o)))).flat(); // USDC first, then EURC
+  acceptsCache = { v: structuredClone(v), t: Date.now(), k };
+  return v;
+}
 
 export async function handleMcp(req, env) {
   const mcp = new McpServer({ name: "italycheck", version: "0.2.0" });
@@ -16,17 +33,21 @@ export async function handleMcp(req, env) {
     async ({ piva }) => { const p = parseVat(piva); return out({ ...p, checksumOk: p.countryCode === "IT" ? itChecksum(p.vatNumber) : null }); });
 
   if (req.method === "POST") {
-    // Payment requirements are only needed for tool calls; tools/list stays cheap.
-    const { network, payTo, server } = buildX402(env);
-    await server.initialize();
-    const accepts = (await Promise.all(acceptsFor(env.PRICE_PA || "$0.005", network, payTo, env)
-      .map(o => server.buildPaymentRequirements(o)))).flat(); // USDC first, then EURC
-    const paid = createPaymentWrapper(server, { accepts, resource: {
-      url: new URL("/mcp#lookup_italian_pa", req.url).toString(), description: DESCRIPTIONS.pa.replace(" Input: ?cf=80016350821.", ""),
-      mimeType: "application/json", serviceName: "ItalyCheck", tags: ["italy", "public-administration", "pec", "kyb", "e-invoicing"] } });
+    const resource = { url: new URL("/mcp#lookup_italian_pa", req.url).toString(), description: DESCRIPTIONS.pa.replace(" Input: ?cf=80016350821.", ""),
+      mimeType: "application/json", serviceName: "ItalyCheck", tags: ["italy", "public-administration", "pec", "kyb", "e-invoicing"] };
+    const handler = async ({ cf }) => out(await ipaLookup(cf));
     mcp.tool("lookup_italian_pa", DESCRIPTIONS.pa.replace(" Input: ?cf=80016350821.", "") + ` Costs ${env.PRICE_PA || "$0.005"} in USDC (or ${(env.PRICE_PA || "$0.005").replace("$", "")} EURC) on Base via x402.`,
       { cf: z.string().describe("11-digit codice fiscale, e.g. 80016350821") },
-      paid(async ({ cf }) => out(await ipaLookup(cf))));
+      async (args, extra) => {
+        const unpaid = !extractPaymentFromMeta({ _meta: extra?._meta });
+        if (unpaid) { const hit = mcpUnpaid.get(resource.url); if (hit) return structuredClone(hit); }
+        const { network, payTo, server } = buildX402(env);
+        await server.initialize();
+        const accepts = await getAccepts(env, network, payTo, server);
+        const res = await createPaymentWrapper(server, { accepts, resource })(handler)(args, extra);
+        if (unpaid && res?.isError && res.structuredContent?.x402Version) mcpUnpaid.set(resource.url, structuredClone(res));
+        return res;
+      });
   }
   const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
   await mcp.connect(transport);
