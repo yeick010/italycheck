@@ -103,3 +103,13 @@ Rollback: `wrangler rollback` (stesso prefisso npx/node@22) oppure ridistribuire
 - Nessuno scheduler per `revenue-state.mjs`: serve una routine, se Yeison la vuole.
 - La CPU per evento non è nei log (invocation_logs = false).
 - Il tipo di chiave CDP in produzione (non letta). Il percorso JWT è stato misurato con una chiave Ed25519 finta.
+
+## Esito deploy (30/10/2026, approvato da Yeison alle 11:58)
+- Deploy del branch `fix/incassi-pagamenti-cpu` @ 70b5811 alle **11:59:34 (Europe/Rome)**. Prima del deploy `npm test` dava 64 PASS e 0 FAIL. Nessun push e nessun merge.
+- Versione nuova: `a6844a94-cf67-4152-9dee-877c81ed1517`. Versione precedente (per il rollback): `2667156d-1f0a-459d-94c8-247abcc7a62a`.
+- Verifiche funzionali con UA `italycheck-probe/1`, tutte OK e **identiche byte per byte** a quelle salvate prima del deploy: `/` 200; `/v1/pa?cf=80016350821` 402 con header `payment-required` uguale (x402 v2, USDC ed EURC su eip155:8453, amount 5000); `/mcp` initialize e tools/list (check_partita_iva_format, lookup_italian_pa); tools/call non pagato con payment-required. I test live di `test/run.js` passano (exit 0).
+- CPU (GraphQL `workersInvocationsAdaptive`, script italycheck):
+  - Prima (versione 2667156d, 72 h fino al deploy): 6983 richieste, p50 5.94 ms, p99 43.69 ms. Stessa mezz'ora del 29/10: 42 richieste, p50 9.63 ms, p99 47.82 ms.
+  - Dopo (versione a6844a94, 12:03–12:34 Rome, senza le mie sonde e i test): **46 richieste, p50 1.20 ms, p99 27.57 ms**. Includendo le sonde (11:59–12:34): 67 richieste, p50 1.44 ms, p99 52.59 ms. Il 52.59 è una richiesta delle 11:59, durante i miei test.
+  - Con 46 richieste il p99 coincide in pratica con il massimo, quindi **non è ancora un giudizio: né pass né fail**. Il p50 è sceso di circa 5 volte. Circa 3–4 richieste su 46 superano ancora 10 ms (per minuto il massimo è 11.2, 12.0 e 27.6 ms). Il p99 non è peggiorato rispetto a prima, quindi **nessun rollback**.
+- Ancora aperto: rimisurare dopo 24–48 h con `node scripts/cf-usage.mjs` e growth-eval per avere un p99 con un campione sufficiente. Se il p99 resta sopra 10 ms, va capito quale rotta produce le richieste fredde rimaste (la CPU per evento non è nei log).
