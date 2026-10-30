@@ -3,7 +3,9 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { itChecksum } from "../src/core.js";
 import { createApp, acceptsFor } from "../src/app.js";
-const ok = (n, c, extra = "") => console.log(`${c ? "PASS" : "FAIL"}  ${n} ${extra}`);
+let failed = 0;
+const ok = (n, c, extra = "") => { if (!c) failed++; console.log(`${c ? "PASS" : "FAIL"}  ${n} ${extra}`); };
+process.on("exit", () => { if (failed) { console.log(`${failed} FAILED`); process.exitCode = 1; } });
 
 ok("checksum valid IT", itChecksum("00743110157"));
 ok("checksum invalid IT", !itChecksum("00743110158"));
@@ -27,6 +29,7 @@ ok("x402: USDC first, EURC second", req?.accepts?.length === 2 && req.accepts[0]
 { const a = acceptsFor("$0.005", "eip155:8453", "0xde8380854ef9c926093832501d95a47f4c63fe7c");
   ok("x402 mainnet accepts: USDC + EURC (Base)", a.length === 2 && a[0].price === "$0.005" && a[1].price.asset === "0x60a3E35Cc302bFA44Cb288Bc5a4F316Fdb1adb42" && a[1].price.amount === "5000", JSON.stringify(a[1].price)); }
 
+// Local stdio MCP server (src/mcp.js), not the remote /mcp handler; remote fast paths are tested in test/fast-paths.js.
 const t = new StdioClientTransport({ command: "node", args: ["src/mcp.js"], env: { ...process.env, ITALYCHECK_LOCAL: "1" } });
 const c = new Client({ name: "t", version: "1" }); await c.connect(t);
 const tools = await c.listTools(); ok("MCP lists tools", tools.tools.length === 2, tools.tools.map(x => x.name).join(","));
@@ -51,6 +54,15 @@ try { validateBazaarRouteExtensions(createApp.__routes ?? {}); ok("bazaar valida
   ok("402 cache: miss == fresh createApp", JSON.stringify(miss) === JSON.stringify(fresh), `status=${miss.status}`);
   ok("402 cache: hit == miss (status, headers, body)", JSON.stringify(hit) === JSON.stringify(miss) && unpaid402.size === 1);
   const prj = JSON.parse(Buffer.from(new Headers(hit.headers).get("payment-required"), "base64").toString());
+  // Live read-only check: the static fast 402 must match what production serves today (same mainnet env as wrangler.toml).
+  try {
+    const { fastUnpaid402 } = await import("../src/fast-paths.js");
+    const LIVE = "https://italycheck.italycheck.workers.dev/v1/pa?cf=80016350821";
+    const live = await fetch(LIVE, { headers: { "user-agent": "italycheck-probe/1 test" } });
+    const dec = h => JSON.parse(Buffer.from(h, "base64").toString());
+    const f = fastUnpaid402(LIVE, { X402_NETWORK: "eip155:8453", PAY_TO: "0xde8380854ef9c926093832501d95a47f4c63fe7c", ENABLE_VAT: "0" });
+    ok("fast 402 == live production 402 (decoded payment-required, live)", live.status === 402 && JSON.stringify(dec(live.headers.get("payment-required"))) === JSON.stringify(dec(new Headers(f.headers).get("payment-required"))));
+  } catch (e) { ok("fast 402 == live production 402 (live)", false, e.message); }
   ok("402 cache: resource.url keeps query, bazaar present", prj.resource.url === U && !!prj.extensions?.bazaar && prj.accepts.length === 2);
   await paidRoute(new Request(U.replace("80016350821", "00743110157")), env);
   ok("402 cache: keyed by full URL incl. query", unpaid402.size === 2);

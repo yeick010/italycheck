@@ -8,6 +8,7 @@
 import { createApp } from "./app.js";
 import { handleMcp } from "./remote-mcp.js";
 import { PlainCache } from "./cache.js";
+import { fastUnpaid402 } from "./fast-paths.js";
 const PAID = /^\/v1\/(pa|vat)(\/?$)/;
 let freeApp = null;
 export const unpaid402 = new PlainCache(500, 3600_000);
@@ -19,9 +20,12 @@ const toResponse = e => new Response(e.body, { status: e.status, headers: e.head
 
 export async function paidRoute(req, env, ctx, log = null) {
   if (req.method !== "GET" || hasPayment(req)) return createApp(env, log).fetch(req, env, ctx);
-  const key = (isBrowser(req) ? "h " : "j ") + req.url;
+  const browser = isBrowser(req);
+  const key = (browser ? "h " : "j ") + req.url;
   const hit = unpaid402.get(key);
   if (hit) return toResponse(hit);
+  const fast = browser ? null : fastUnpaid402(req.url, env); // plain data, no app/x402 server (CPU on cold isolates)
+  if (fast) { if (log) log.fast_402 = true; unpaid402.set(key, fast); return toResponse(fast); }
   const res = await createApp(env).fetch(req, env, ctx);
   if (res.status !== 402) return res;
   const e = { status: res.status, headers: [...res.headers], body: await res.text() };
@@ -29,25 +33,26 @@ export async function paidRoute(req, env, ctx, log = null) {
   return toResponse(e);
 }
 
-function route(req, env, ctx, path, log) {
-  if (path === "/mcp") return handleMcp(req, env, log);
+function route(req, env, ctx, path, log, mcpMsg) {
+  if (path === "/mcp") return handleMcp(req, env, log, mcpMsg);
   if (PAID.test(path)) return paidRoute(req, env, ctx, log);
   freeApp ??= createApp({ ...env, DISABLE_PAYMENTS: "1", FREE_ONLY: "1" });
   return freeApp.fetch(req, env, ctx);
 }
 
-// JSON-RPC method (+ tool name) of a POST /mcp body, read from a clone so the transport still gets the stream.
-// Batches report the first message. Bodies over 64 KB are not parsed (CPU).
-export async function mcpInfo(req) {
-  if (req.method !== "POST" || +(req.headers.get("content-length") || 0) > 65536) return {};
-  try {
-    let m = JSON.parse(await req.clone().text());
-    if (Array.isArray(m)) m = m[0];
-    const o = { mcp_method: typeof m?.method === "string" ? m.method.slice(0, 60) : null };
-    if (o.mcp_method === "tools/call") { o.tool = String(m.params?.name ?? "").slice(0, 60); o.has_mcp_payment = !!m.params?._meta?.["x402/payment"]; }
-    return o;
-  } catch { return { mcp_method: "unparsable" }; }
+// Parsed POST /mcp body (read from a clone so the SDK transport can still read the stream) + its log fields
+// (JSON-RPC method, tool name). Batches report the first message. Bodies over 64 KB are not parsed (CPU).
+// msg is undefined when not parsed, which sends the request down the SDK path.
+export async function mcpBody(req) {
+  if (req.method !== "POST" || +(req.headers.get("content-length") || 0) > 65536) return { info: {}, msg: undefined };
+  let msg;
+  try { msg = JSON.parse(await req.clone().text()); } catch { return { info: { mcp_method: "unparsable" }, msg: undefined }; }
+  const m = Array.isArray(msg) ? msg[0] : msg;
+  const o = { mcp_method: typeof m?.method === "string" ? m.method.slice(0, 60) : null };
+  if (o.mcp_method === "tools/call") { o.tool = String(m.params?.name ?? "").slice(0, 60); o.has_mcp_payment = !!m.params?._meta?.["x402/payment"]; }
+  return { info: o, msg };
 }
+export const mcpInfo = async req => (await mcpBody(req)).info;
 
 // One structured log line per request (Workers Logs indexes the fields). No IPs, headers, payment payloads or secrets.
 export function requestLog(req, path) {
@@ -60,9 +65,10 @@ export default {
   async fetch(req, env, ctx) {
     const path = new URL(req.url).pathname;
     const log = requestLog(req, path);
-    if (path === "/mcp") Object.assign(log, await mcpInfo(req));
+    let mcpMsg;
+    if (path === "/mcp") { const b = await mcpBody(req); Object.assign(log, b.info); mcpMsg = b.msg; }
     try {
-      const res = await route(req, env, ctx, path, log);
+      const res = await route(req, env, ctx, path, log, mcpMsg);
       log.status = res.status;
       return res;
     } catch (e) {

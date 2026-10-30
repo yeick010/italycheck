@@ -29,7 +29,7 @@ const PA_EXAMPLE = { status: "found", isPublicAdministration: true, source: "Ind
 
 // EURC (Circle, EIP-3009) per network. Addresses: https://developers.circle.com/stablecoins/eurc-contract-addresses
 // EIP-712 domain read on-chain (name()="EURC", version()="2", decimals()=6) on Base mainnet and Base Sepolia.
-const EURC = {
+export const EURC = {
   "eip155:8453": "0x60a3E35Cc302bFA44Cb288Bc5a4F316Fdb1adb42",
   "eip155:84532": "0x808456652fdb597867f38412077A9182bf77359F",
 };
@@ -43,9 +43,17 @@ export function acceptsFor(price, network, payTo, env = {}) {
   return [usdc, { scheme: "exact", price: { amount, asset: eurc, extra: { name: "EURC", version: "2" } }, network, payTo }];
 }
 
+const netOf = env => env.X402_NETWORK || "eip155:8453"; // Base mainnet; testnet = eip155:84532
+const payToOf = env => env.PAY_TO || "0xde8380854ef9c926093832501d95a47f4c63fe7c"; // Yeison's Base wallet
+
+// Bazaar discovery declaration for GET /v1/pa (also used by the plain-data 402 in fast-paths.js).
+export const PA_DISCOVERY = { method: "GET",
+  input: { cf: "80016350821" },
+  inputSchema: { properties: { cf: { type: "string", pattern: "^[0-9]{11}$", description: "11-digit codice fiscale of the Italian public entity" } }, required: ["cf"] },
+  output: { example: PA_EXAMPLE } };
+
 export function buildX402(env = {}, log = null) {
-  const network = env.X402_NETWORK || "eip155:8453"; // Base mainnet; testnet = eip155:84532
-  const payTo = env.PAY_TO || "0xde8380854ef9c926093832501d95a47f4c63fe7c"; // Yeison's Base wallet
+  const network = netOf(env), payTo = payToOf(env);
   // CDP facilitator (mainnet) when keys are present; otherwise x402.org testnet facilitator.
   let facCfg = { url: env.FACILITATOR_URL || "https://x402.org/facilitator" };
   if (env.CDP_API_KEY_ID && env.CDP_API_KEY_SECRET) {
@@ -65,8 +73,7 @@ export function buildX402(env = {}, log = null) {
 }
 
 export function createApp(env = {}, log = null) {
-  const { network, payTo, server } = buildX402(env, log);
-  server.registerExtension(bazaarResourceServerExtension);
+  const network = netOf(env), payTo = payToOf(env);
   const vatOn = env.ENABLE_VAT === "1"; // VIES off by default pending legal review
   const app = new Hono();
 
@@ -87,13 +94,13 @@ export function createApp(env = {}, log = null) {
   });
 
   if (env.DISABLE_PAYMENTS !== "1") {
+    // x402 server only for apps that charge (the free app never builds it: CPU on cold isolates).
+    const { server } = buildX402(env, log);
+    server.registerExtension(bazaarResourceServerExtension);
     app.use(paymentMiddleware({
       ...(vatOn ? { "GET /v1/vat": { accepts: [{ scheme: "exact", price: env.PRICE_VAT || "$0.01", network, payTo }], description: DESCRIPTIONS.vat, mimeType: "application/json" } } : {}),
       "GET /v1/pa": { accepts: acceptsFor(env.PRICE_PA || "$0.005", network, payTo, env), description: DESCRIPTIONS.pa, mimeType: "application/json",
-        extensions: declareDiscoveryExtension({ method: "GET",
-          input: { cf: "80016350821" },
-          inputSchema: { properties: { cf: { type: "string", pattern: "^[0-9]{11}$", description: "11-digit codice fiscale of the Italian public entity" } }, required: ["cf"] },
-          output: { example: PA_EXAMPLE } }) },
+        extensions: declareDiscoveryExtension(PA_DISCOVERY) },
     }, server));
   }
 

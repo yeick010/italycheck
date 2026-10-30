@@ -14,6 +14,8 @@
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { chainPayments } from "./lib/onchain.mjs";
+import { probeUaFilter, segmentsOutsideProbes } from "./lib/probes.mjs";
 
 // ───────────── Thresholds (edit here) ─────────────
 const THRESHOLDS = {
@@ -37,21 +39,14 @@ const THRESHOLDS = {
   max_prelaunch_share_prev: 0.5,   // previous window > 50% before launch → WoW growth is N.D.
 };
 // ───────────── Config ─────────────
-const PAY_TO = "0xde8380854ef9c926093832501d95a47f4c63fe7c";
-const TOKENS = { USDC: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", EURC: "0x60a3E35Cc302bFA44Cb288Bc5a4F316Fdb1adb42" };
-const EXCLUDED_PAYERS = ["0x00D17A447f286fd673c6bFFb59fDe031b65ee5d8"].map(a => a.toLowerCase()); // own test wallet
 const PRICE = 0.005;
 const SERVICE_START = "2026-10-15T22:00:00Z";  // ~16/10 Rome; on-chain history is scanned from HISTORY_START
 const HISTORY_START = "2026-10-12T22:00:00Z";  // 13/10 00:00 Rome
 const LOGS_START = "2026-10-24T18:35:00Z";     // Workers Logs enabled ~20:35 Rome
 const LOGS_RETENTION_DAYS = 3;
-const RPCS = ["https://base.publicnode.com", "https://mainnet.base.org"];
-const RPC_MAX_RANGE = 49_999;                  // publicnode getLogs limit is 50k blocks
-const BASE_BLOCK_SECONDS = 2;
 const ACCOUNT = process.env.CLOUDFLARE_ACCOUNT_ID || "3f0071e891f5fc1d8a71ba5cd8f0b074";
 const SCRIPT = "italycheck";
 const FREE_DAILY_REQUESTS = 100_000;
-const TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
 const HISTORY_FILE = join(dirname(fileURLToPath(import.meta.url)), "..", "growth-history.jsonl");
 
 const arg = (k, d) => { const i = process.argv.indexOf(k); return i > 0 ? process.argv[i + 1] : d; };
@@ -68,46 +63,7 @@ const romeMidnightUtc = ymd => { // Europe/Rome midnight of a YYYY-MM-DD as a Da
 };
 const rome = d => new Date(d).toLocaleString("sv-SE", { timeZone: "Europe/Rome" }).slice(0, 16);
 
-// ───────────── On-chain revenue ─────────────
-let rpcId = 0;
-async function rpc(method, params) {
-  let last;
-  for (let attempt = 0; attempt < 6; attempt++) {
-    const url = RPCS[attempt % RPCS.length];
-    try {
-      const r = await fetch(url, { method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ jsonrpc: "2.0", id: ++rpcId, method, params }) });
-      const j = await r.json();
-      if (j.error) throw new Error(`${url}: ${j.error.message}`);
-      return j.result;
-    } catch (e) { last = e; await new Promise(res => setTimeout(res, 500 * (attempt + 1))); }
-  }
-  throw last;
-}
-
-async function chainPayments(since) {
-  const latest = parseInt(await rpc("eth_blockNumber", []), 16);
-  const latestTs = parseInt((await rpc("eth_getBlockByNumber", ["0x" + latest.toString(16), false])).timestamp, 16) * 1000;
-  const start = Math.max(0, latest - Math.ceil((latestTs - Date.parse(since)) / 1000 / BASE_BLOCK_SECONDS) - 2000);
-  const symbolOf = Object.fromEntries(Object.entries(TOKENS).map(([s, a]) => [a.toLowerCase(), s]));
-  const logs = [];
-  for (let f = start; f <= latest; f += RPC_MAX_RANGE + 1) {
-    const t = Math.min(f + RPC_MAX_RANGE, latest);
-    logs.push(...await rpc("eth_getLogs", [{ fromBlock: "0x" + f.toString(16), toBlock: "0x" + t.toString(16),
-      address: Object.values(TOKENS), topics: [TRANSFER_TOPIC, null, "0x" + PAY_TO.slice(2).padStart(64, "0")] }]));
-  }
-  const tsCache = {};
-  const out = [];
-  for (const l of logs) {
-    tsCache[l.blockNumber] ??= parseInt((await rpc("eth_getBlockByNumber", [l.blockNumber, false])).timestamp, 16) * 1000;
-    const from = "0x" + l.topics[1].slice(26).toLowerCase();
-    const amount = Number(BigInt(l.data)) / 1e6; // USDC and EURC both have 6 decimals
-    if (amount <= 0 || EXCLUDED_PAYERS.includes(from) || from === PAY_TO) continue;
-    out.push({ ts: tsCache[l.blockNumber], token: symbolOf[l.address.toLowerCase()], amount, from, tx: l.transactionHash });
-  }
-  return { payments: out.sort((a, b) => a.ts - b.ts), scanned_blocks: [start, latest], chain_head_ts: latestTs };
-}
-
+// ───────────── On-chain revenue (scripts/lib/onchain.mjs) ─────────────
 function revenueMetrics(payments, from, to) {
   const inW = payments.filter(p => p.ts >= from && p.ts < to);
   const before = payments.filter(p => p.ts < from);
@@ -161,7 +117,13 @@ async function trafficMetrics(from, to) {
 }
 
 // ───────────── Workers Logs (402 funnel) ─────────────
+// Counts exclude our own probes: UA filter + known probe time windows (see scripts/lib/probes.mjs).
 async function logsCount(from, to, extra) {
+  let n = 0;
+  for (const [a, b] of segmentsOutsideProbes(from, to)) n += await logsCountRaw(a, b, [...extra, probeUaFilter()]);
+  return n;
+}
+async function logsCountRaw(from, to, extra) {
   const r = await fetch(`https://api.cloudflare.com/client/v4/accounts/${ACCOUNT}/workers/observability/telemetry/query`, {
     method: "POST", headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" },
     body: JSON.stringify({ queryId: "italycheck-growth-eval", view: "calculations", timeframe: { from, to }, ignoreSeries: true,

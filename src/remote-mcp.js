@@ -10,6 +10,7 @@ import { buildX402, acceptsFor, DESCRIPTIONS } from "./app.js";
 import { ipaLookup, itChecksum, parseVat } from "./core.js";
 import { PlainCache } from "./cache.js";
 import { readableMcpFailures } from "./payments.js";
+import { fastMcp, MCP_SERVER_INFO, TOOL_FORMAT, paToolDescription, PA_ARG_DESCRIPTION } from "./fast-paths.js";
 
 const out = o => ({ content: [{ type: "text", text: JSON.stringify(o) }] });
 const TTL = 3600_000;
@@ -27,18 +28,24 @@ async function getAccepts(env, network, payTo, server) {
   return v;
 }
 
-export async function handleMcp(req, env, log = null) {
-  const mcp = new McpServer({ name: "italycheck", version: "0.2.0" });
-  mcp.tool("check_partita_iva_format", "Free offline check of an Italian partita IVA (11 digits + check digit). Does not confirm registration.",
-    { piva: z.string().describe("Italian partita IVA, e.g. 00743110157") },
+// msg: the parsed JSON-RPC body when the caller already has it (worker.js). Common methods are answered as plain
+// data (fast-paths.js); everything else goes through the SDK below. Pass msg = undefined to force the SDK path.
+export async function handleMcp(req, env, log = null, msg = undefined) {
+  if (msg !== undefined) {
+    const fast = fastMcp(req, msg, env, url => { const hit = mcpUnpaid.get(url); return hit && structuredClone(hit); });
+    if (fast) { if (log) log.mcp_fast = true; return fast; }
+  }
+  const mcp = new McpServer({ ...MCP_SERVER_INFO });
+  mcp.tool(TOOL_FORMAT.name, TOOL_FORMAT.description,
+    { [TOOL_FORMAT.arg]: z.string().describe(TOOL_FORMAT.argDescription) },
     async ({ piva }) => { const p = parseVat(piva); return out({ ...p, checksumOk: p.countryCode === "IT" ? itChecksum(p.vatNumber) : null }); });
 
   if (req.method === "POST") {
     const resource = { url: new URL("/mcp#lookup_italian_pa", req.url).toString(), description: DESCRIPTIONS.pa.replace(" Input: ?cf=80016350821.", ""),
       mimeType: "application/json", serviceName: "ItalyCheck", tags: ["italy", "public-administration", "pec", "kyb", "e-invoicing"] };
     const handler = async ({ cf }) => out(await ipaLookup(cf));
-    mcp.tool("lookup_italian_pa", DESCRIPTIONS.pa.replace(" Input: ?cf=80016350821.", "") + ` Costs ${env.PRICE_PA || "$0.005"} in USDC (or ${(env.PRICE_PA || "$0.005").replace("$", "")} EURC) on Base via x402.`,
-      { cf: z.string().describe("11-digit codice fiscale, e.g. 80016350821") },
+    mcp.tool("lookup_italian_pa", paToolDescription(env),
+      { cf: z.string().describe(PA_ARG_DESCRIPTION) },
       async (args, extra) => {
         const unpaid = !extractPaymentFromMeta({ _meta: extra?._meta });
         if (unpaid) { const hit = mcpUnpaid.get(resource.url); if (hit) return structuredClone(hit); }

@@ -7,7 +7,7 @@
     "start": "node src/node.js",
     "dev": "DISABLE_PAYMENTS=1 node src/node.js",
     "mcp": "node src/mcp.js",
-    "test": "node test/run.js"
+    "test": "node test/run.js && node test/fast-paths.js"
   },
   "keywords": [],
   "author": "",
