@@ -24,7 +24,7 @@ echo "tests: $(grep -c '^PASS' /tmp/italycheck-deploy-tests.log) PASS, $(grep -c
 rm -rf /tmp/italycheck-dryrun && W deploy --dry-run --outdir /tmp/italycheck-dryrun > /dev/null || { echo "ABORT: bundle build failed"; exit 1; }
 LIVE=$(live_version)
 [ "$LIVE" = "$ROLLBACK" ] || { echo "ABORT: live version is $LIVE, not $ROLLBACK (pass the current live version)"; exit 1; }
-node scripts/smoke.mjs "$BASE" > /dev/null || { echo "ABORT: smoke already failing on the live version $LIVE"; exit 1; }
+node scripts/smoke.mjs "$BASE" > /tmp/italycheck-presmoke.log 2>&1 || { sleep 10; node scripts/smoke.mjs "$BASE" > /tmp/italycheck-presmoke.log 2>&1; } || { grep FAIL /tmp/italycheck-presmoke.log; echo "ABORT: smoke failing on the live version $LIVE (twice)"; exit 1; }
 
 [ "${DRY_RUN:-}" = 1 ] && { echo "DRY_RUN: preflight OK, live $LIVE, not deploying"; exit 0; }
 echo "== deploy $HEAD (rollback target $ROLLBACK)"
