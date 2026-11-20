@@ -3,11 +3,28 @@
   "name": "io.github.yeick010/italycheck",
   "title": "ItalyCheck",
   "description": "Italian public bodies by codice fiscale (IndicePA): name, PEC, address. Paid per call via x402.",
+  "websiteUrl": "https://github.com/yeick010/italycheck",
+  "icons": [
+    {
+      "src": "https://raw.githubusercontent.com/yeick010/italycheck/main/assets/icon.png",
+      "mimeType": "image/png",
+      "sizes": [
+        "256x256"
+      ]
+    },
+    {
+      "src": "https://raw.githubusercontent.com/yeick010/italycheck/main/assets/icon.svg",
+      "mimeType": "image/svg+xml",
+      "sizes": [
+        "any"
+      ]
+    }
+  ],
   "repository": {
     "url": "https://github.com/yeick010/italycheck",
     "source": "github"
   },
-  "version": "0.2.0",
+  "version": "0.2.1",
   "remotes": [
     {
       "type": "streamable-http",
