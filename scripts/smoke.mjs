@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Production smoke test (read-only, no payment): node scripts/smoke.mjs [baseUrl]
 // Exit 0 only if every check passes. User-Agent "italycheck-probe/1 smoke" so metrics scripts exclude it.
-// Checks: GET / 200 catalog; POST /mcp initialize + tools/list (3 tools); HEAD /mcp 405 (+ GET /mcp 406, prompts/list -32601); GET /v1/pa 402 at 5000; GET /v1/counterparty 402 at 10000
+// Checks: GET / 200 catalog; POST /mcp initialize + tools/list (3 tools); HEAD /mcp 405 (+ GET /mcp 406, prompts/list -32601); GET+HEAD /v1/pa 402 at 5000; GET+HEAD /v1/counterparty 402 at 10000
 // (USDC then EURC on Base mainnet, payTo = Yeison's wallet, as in wrangler.toml).
 const BASE = (process.argv[2] || "https://italycheck.italycheck.workers.dev").replace(/\/$/, "");
 const UA = { "user-agent": "italycheck-probe/1 smoke" };
@@ -9,6 +9,10 @@ const NET = "eip155:8453", PAY_TO = "0xde8380854ef9c926093832501d95a47f4c63fe7c"
 const USDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", EURC = "0x60a3E35Cc302bFA44Cb288Bc5a4F316Fdb1adb42";
 let failed = 0;
 const ok = (name, cond, extra = "") => { if (!cond) failed++; console.log(`${cond ? "PASS" : "FAIL"}  ${name}${extra ? "  " + extra : ""}`); };
+// SMOKE_HEAD_INFO=1: HEAD /v1/* checks are reported but not counted (only for versions older than the HEAD 402 fix,
+// i.e. the deploy preflight and the post-rollback check when the rollback target predates it).
+const okHead = (name, cond, extra = "") => process.env.SMOKE_HEAD_INFO === "1" && !cond
+  ? console.log(`INFO  ${name}${extra ? "  " + extra : ""}  (not counted: SMOKE_HEAD_INFO=1)`) : ok(name, cond, extra);
 const mcp = (body) => fetch(BASE + "/mcp", { method: "POST", headers: { ...UA, "content-type": "application/json",
   accept: "application/json, text/event-stream", "mcp-protocol-version": "2025-06-18" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, ...body }) });
 const accepts = (pr, amount) => JSON.stringify((pr.accepts || []).map(a => [a.scheme, a.network, a.amount, a.asset, a.payTo]))
@@ -19,6 +23,12 @@ async function paid402(path, amount) {
   try { pr = JSON.parse(atob(r.headers.get("payment-required") || "")); } catch {}
   ok(`GET ${path} -> 402, ${amount} USDC+EURC to payTo on Base`, r.status === 402 && pr.x402Version === 2 && accepts(pr, amount),
     `status=${r.status} accepts=${JSON.stringify((pr.accepts || []).map(a => a.amount + "@" + String(a.asset).slice(0, 6)))}`);
+  const h = await fetch(BASE + path, { method: "HEAD", headers: { ...UA, accept: "application/json" } });
+  let hp = {};
+  try { hp = JSON.parse(atob(h.headers.get("payment-required") || "")); } catch {}
+  const hb = await h.text();
+  okHead(`HEAD ${path} -> 402, ${amount} USDC+EURC to payTo on Base, no body`, h.status === 402 && hp.x402Version === 2 && accepts(hp, amount) && hb === "",
+    `status=${h.status} body=${hb.length}`);
 }
 try {
   const root = await fetch(BASE + "/", { headers: UA });

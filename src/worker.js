@@ -21,9 +21,26 @@ const toResponse = e => new Response(e.body, { status: e.status, headers: e.head
 // Hono's 404 for methods the paid routes don't serve (POST /v1/pa ...): no app or x402 server needed (byte-checked in tests).
 const notFound = () => new Response("404 Not Found", { status: 404, headers: { "content-type": "text/plain; charset=UTF-8" } });
 
+// HEAD to a paid route (approved by Yeison 20/11/2026 22:24): always the unpaid JSON GET 402 (same status and headers,
+// incl. PAYMENT-REQUIRED), no body. Never runs the lookup or a settlement, even with a payment header (HEAD carries no data).
+// Before this, HEAD fell through to the app: 200 without payment and a full IndicePA lookup.
+async function headPaid(req, env, ctx, log) {
+  if (log) log.head_402 = true;
+  const key = "j " + req.url;
+  let e = unpaid402.get(key);
+  if (!e) { e = fastUnpaid402(req.url, env); if (e) { if (log) log.fast_402 = true; unpaid402.set(key, e); } }
+  if (!e) { // library path (non-default configs): the GET it stands for, without payment headers, body dropped
+    const h = new Headers(req.headers); h.delete("payment-signature"); h.delete("x-payment"); h.set("accept", "application/json");
+    const res = await createApp(env).fetch(new Request(req.url, { method: "GET", headers: h }), env, ctx);
+    return new Response(null, { status: res.status, headers: res.headers });
+  }
+  return new Response(null, { status: e.status, headers: e.headers });
+}
+
 export async function paidRoute(req, env, ctx, log = null) {
   if (req.method !== "GET" && req.method !== "HEAD" && !hasPayment(req)) { if (log) log.fast_404 = true; return notFound(); }
-  if (req.method !== "GET" || hasPayment(req)) return createApp(env, log).fetch(req, env, ctx);
+  if (req.method === "HEAD") return headPaid(req, env, ctx, log);
+  if (hasPayment(req)) return createApp(env, log).fetch(req, env, ctx);
   const browser = isBrowser(req);
   const key = (browser ? "h " : "j ") + req.url;
   const hit = unpaid402.get(key);

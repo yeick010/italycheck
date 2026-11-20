@@ -101,6 +101,37 @@ for (const [name, env, url] of [
   ok("worker paidRoute: /v1/pa and /v1/counterparty 402s differ only by route data", pa.status === 402 && dec(new Headers(pa.headers).get("payment-required")).accepts[0].amount === "5000"
     && dec(new Headers(r.headers).get("payment-required")).accepts[0].amount === "10000"); unpaid402.clear(); }
 
+// ── HEAD on paid routes: 402 like GET, no body, no IndicePA lookup, no verify/settle (Yeison 20/11/2026 22:24) ──
+{ const PA = "https://italycheck.example/v1/pa?cf=80016350821";
+  const head = (u, h = {}) => new Request(u, { method: "HEAD", headers: h });
+  for (const [name, env] of [["mainnet", { X402_NETWORK: "eip155:8453", PAY_TO: "0xde8380854ef9c926093832501d95a47f4c63fe7c", ENABLE_VAT: "0", PRICE_PA: "$0.005" }],
+    ["library path (ENABLE_VAT=1)", { X402_NETWORK: "eip155:8453", ENABLE_VAT: "1" }]]) {
+    for (const [u, amount] of [[PA, "5000"], [CP, "10000"]]) {
+      const path = new URL(u).pathname;
+      unpaid402.clear(); calls.ipa = []; calls.verify = 0; calls.settle = 0;
+      const log = {}; const h = await snap(await paidRoute(head(u), env, {}, log));
+      const g = await snap(await paidRoute(new Request(u), env, {}));
+      ok(`HEAD ${path} (${name}) -> 402, empty body, ${amount}`, h.status === 402 && h.body === "" && log.head_402 === true
+        && dec(new Headers(h.headers).get("payment-required")).accepts.every(a => a.amount === amount), `status=${h.status} body=${h.body.length}`);
+      ok(`HEAD ${path} (${name}) headers == GET 402 headers`, g.status === 402 && same(h.headers, g.headers));
+      ok(`HEAD ${path} (${name}) -> no IndicePA lookup, no verify/settle`, calls.ipa.length === 0 && calls.verify === 0 && calls.settle === 0, `ipa=${calls.ipa.length}`);
+      calls.ipa = [];
+      const hp = await snap(await paidRoute(head(u, { "payment-signature": "eyJ4NDAyVmVyc2lvbiI6Mn0=" }), env, {}));
+      ok(`HEAD ${path} (${name}) with payment header -> 402, no lookup, not charged`, hp.status === 402 && hp.body === "" && calls.ipa.length === 0 && calls.verify === 0 && calls.settle === 0);
+    }
+  }
+  unpaid402.clear(); calls.ipa = [];
+  const env = { X402_NETWORK: "eip155:8453" };
+  await paidRoute(new Request(PA), env, {}); // GET fills the cache, HEAD reuses it
+  const log = {}; const h = await snap(await paidRoute(head(PA, { accept: "text/html", "user-agent": "Mozilla/5.0" }), env, {}, log));
+  ok("HEAD (browser headers, cache hit) -> JSON 402, no body, no lookup", h.status === 402 && h.body === "" && unpaid402.size === 1 && calls.ipa.length === 0
+    && new Headers(h.headers).get("content-type") === "application/json");
+  const { default: worker } = await import("../src/worker.js");
+  const out = []; const cl = console.log; console.log = o => out.push(o);
+  let wr; try { wr = await worker.fetch(head(CP), env, {}); } finally { console.log = cl; }
+  ok("worker.fetch HEAD /v1/counterparty -> 402, logged head_402", wr.status === 402 && (await wr.text()) === "" && out[0]?.head_402 === true && out[0]?.status === 402 && calls.ipa.length === 0);
+  unpaid402.clear(); }
+
 // ── Paid flows with the mock facilitator: charged only for a verdict ──
 { const { x402Client } = await import("@x402/core/client");
   const { ExactEvmScheme } = await import("@x402/evm");
