@@ -9,7 +9,7 @@ import { createApp } from "./app.js";
 import { handleMcp } from "./remote-mcp.js";
 import { PlainCache } from "./cache.js";
 import { fastUnpaid402 } from "./fast-paths.js";
-const PAID = /^\/v1\/(pa|vat)(\/?$)/;
+const PAID = /^\/v1\/(pa|vat|counterparty)(\/?$)/;
 let freeApp = null;
 export const unpaid402 = new PlainCache(500, 3600_000);
 
