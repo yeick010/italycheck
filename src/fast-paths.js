@@ -6,6 +6,8 @@
 // odd prices, browsers, batches, bad headers, unknown methods) returns null and takes the normal library path.
 import { encodePaymentRequiredHeader, PAYMENT_REQUIRED_CACHE_CONTROL } from "@x402/core/http";
 import { SUPPORTED_PROTOCOL_VERSIONS, LATEST_PROTOCOL_VERSION } from "@modelcontextprotocol/sdk/types.js";
+import { isJsonContentType } from "@modelcontextprotocol/sdk/shared/mediaType.js";
+import { DEFAULT_SSE_KEEP_ALIVE_MS } from "@modelcontextprotocol/sdk/server/sseKeepAlive.js";
 import { declareDiscoveryExtension, bazaarResourceServerExtension } from "@x402/extensions/bazaar";
 import { DESCRIPTIONS, EURC, PA_DISCOVERY, COUNTERPARTY_DISCOVERY, priceCounterparty } from "./app.js";
 
@@ -93,28 +95,77 @@ function toolsList(env) {
 const isObj = o => o !== null && typeof o === "object" && !Array.isArray(o);
 const jsonRes = (result, id) => new Response(JSON.stringify({ result, jsonrpc: "2.0", id }), { status: 200, headers: { "content-type": "application/json" } });
 
-// msg = parsed JSON body (worker.js parses it once for the request log). getUnpaid(url) = cached payment-required result.
-export function fastMcp(req, msg, env, getUnpaid) {
-  if (req.method !== "POST" || !isObj(msg) || msg.jsonrpc !== "2.0" || typeof msg.method !== "string") return null;
-  const accept = req.headers.get("accept") || "";
-  if (!accept.includes("application/json") || !accept.includes("text/event-stream")) return null;
-  if (!(req.headers.get("content-type") || "").includes("application/json")) return null;
+// ── Transport-level answers, same bytes as WebStandardStreamableHTTPServerTransport (stateless, JSON response mode) ──
+// Body markers from worker.js mcpBody(): NO_BODY = not parsed (not a POST, or over 64 KB), BAD_JSON = JSON.parse failed.
+export const NO_BODY = Symbol("mcp-no-body"), BAD_JSON = Symbol("mcp-bad-json");
+const jsonErr = (status, code, message) => new Response(JSON.stringify({ jsonrpc: "2.0", error: { code, message }, id: null }),
+  { status, headers: { "Content-Type": "application/json" } });
+const rpcErr = (id, code, message) => new Response(JSON.stringify({ jsonrpc: "2.0", id, error: { code, message } }),
+  { status: 200, headers: { "content-type": "application/json" } });
+const PV_LIST = SUPPORTED_PROTOCOL_VERSIONS.join(", ");
+const badVersion = req => {
   const pv = req.headers.get("mcp-protocol-version");
-  if (pv !== null && !SUPPORTED_PROTOCOL_VERSIONS.includes(pv)) return null;
+  return pv !== null && !SUPPORTED_PROTOCOL_VERSIONS.includes(pv)
+    ? jsonErr(400, -32000, `Bad Request: Unsupported protocol version: ${pv} (supported versions: ${PV_LIST})`) : null;
+};
+const err405 = () => new Response(JSON.stringify({ jsonrpc: "2.0", error: { code: -32000, message: "Method not allowed." }, id: null }),
+  { status: 405, headers: { Allow: "GET, POST, DELETE", "Content-Type": "application/json" } });
+// Stateless GET: the SDK opens a standalone SSE stream with nothing to send but keep-alive comments every 15 s.
+function sseStream() {
+  const enc = new TextEncoder();
+  let timer;
+  const body = new ReadableStream({
+    start(c) { timer = setInterval(() => { try { c.enqueue(enc.encode(": keepalive\n\n")); } catch { clearInterval(timer); } }, DEFAULT_SSE_KEEP_ALIVE_MS); },
+    cancel() { clearInterval(timer); },
+  });
+  return new Response(body, { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache, no-transform", Connection: "keep-alive", "X-Accel-Buffering": "no" } });
+}
+// Request methods McpServer (tools only) has no handler for: the SDK answers JSON-RPC -32601 (checked per method in tests).
+export const MCP_NOT_FOUND = new Set(["prompts/list", "prompts/get", "resources/list", "resources/templates/list", "resources/read", "server/discover", "completion/complete", "logging/setLevel"]);
+const onlyKeys = (o, spec) => Object.keys(o).every(k => Object.hasOwn(spec, k) && spec[k](o[k]));
+const META = { _meta: isObj };
+const LIST = { cursor: v => typeof v === "string", _meta: isObj };
+const validId = id => typeof id === "string" || (typeof id === "number" && Number.isInteger(id));
+
+// msg = parsed JSON body or a marker (worker.js parses it once for the request log). getUnpaid(url) = cached
+// payment-required result. Returns a Response, or null for the SDK path. Checks run in the SDK transport's order.
+export function fastMcp(req, msg, env, getUnpaid) {
+  const m = req.method;
+  if (m !== "POST" && m !== "GET" && m !== "DELETE") return err405();
+  if (m === "DELETE") return null;
+  const accept = req.headers.get("accept") || "";
+  if (m === "GET") {
+    if (!accept.includes("text/event-stream")) return jsonErr(406, -32000, "Not Acceptable: Client must accept text/event-stream");
+    return badVersion(req) || sseStream();
+  }
+  if (!accept.includes("application/json") || !accept.includes("text/event-stream"))
+    return jsonErr(406, -32000, "Not Acceptable: Client must accept both application/json and text/event-stream");
+  if (!isJsonContentType(req.headers.get("content-type"))) return jsonErr(415, -32000, "Unsupported Media Type: Content-Type must be application/json");
+  if (msg === BAD_JSON) return jsonErr(400, -32700, "Parse error: Invalid JSON");
+  if (msg === NO_BODY || msg === undefined || Array.isArray(msg)) return null; // big bodies and batches: SDK
+  if (!isObj(msg) || msg.jsonrpc !== "2.0") return jsonErr(400, -32700, "Parse error: Invalid JSON-RPC message");
   const { method, id, params } = msg;
-  if (method === "notifications/initialized" && !("id" in msg) && (params === undefined || isObj(params))) return new Response(null, { status: 202 });
-  if (!(typeof id === "string" || (typeof id === "number" && Number.isInteger(id)))) return null;
-  const noParams = params === undefined || (isObj(params) && Object.keys(params).length === 0);
-  if (method === "ping" && noParams) return jsonRes({}, id);
-  if (method === "tools/list" && noParams) return jsonRes(toolsList(env), id);
-  if (method === "initialize" && isObj(params) && typeof params.protocolVersion === "string" && isObj(params.capabilities)
-      && isObj(params.clientInfo) && typeof params.clientInfo.name === "string" && typeof params.clientInfo.version === "string") {
+  if (typeof method !== "string" || (params !== undefined && !isObj(params))) return null;
+  const notification = !("id" in msg);
+  if (!notification && !validId(id)) return null;
+  if (method === "initialize" && !notification) {
+    if (!(isObj(params) && typeof params.protocolVersion === "string" && isObj(params.capabilities) && isObj(params.clientInfo)
+      && typeof params.clientInfo.name === "string" && typeof params.clientInfo.version === "string")) return null;
+    // Initialize ignores the MCP-Protocol-Version header (version negotiation in the body).
     const protocolVersion = SUPPORTED_PROTOCOL_VERSIONS.includes(params.protocolVersion) ? params.protocolVersion : LATEST_PROTOCOL_VERSION;
     return jsonRes({ protocolVersion, capabilities: { tools: { listChanged: true } }, serverInfo: MCP_SERVER_INFO }, id);
   }
-  if (method === "tools/call" && isObj(params) && typeof params.name === "string" && Object.hasOwn(PAID_TOOLS, params.name)
-      && isObj(params.arguments) && typeof params.arguments[PAID_TOOLS[params.name]] === "string" && !params._meta) {
-    const hit = getUnpaid(new URL("/mcp#" + params.name, req.url).toString());
+  if (method === "initialize") return null;
+  const bad = badVersion(req);
+  if (bad) return bad;
+  if (notification) return new Response(null, { status: 202 });
+  const p = params ?? {};
+  if (method === "ping" && onlyKeys(p, META)) return jsonRes({}, id);
+  if (method === "tools/list" && onlyKeys(p, LIST)) return jsonRes(toolsList(env), id);
+  if (MCP_NOT_FOUND.has(method)) return rpcErr(id, -32601, "Method not found");
+  if (method === "tools/call" && typeof p.name === "string" && Object.hasOwn(PAID_TOOLS, p.name)
+      && isObj(p.arguments) && typeof p.arguments[PAID_TOOLS[p.name]] === "string" && !p._meta) {
+    const hit = getUnpaid(new URL("/mcp#" + p.name, req.url).toString());
     if (hit) return jsonRes(hit, id);
   }
   return null;

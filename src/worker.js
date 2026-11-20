@@ -8,7 +8,7 @@
 import { createApp } from "./app.js";
 import { handleMcp } from "./remote-mcp.js";
 import { PlainCache } from "./cache.js";
-import { fastUnpaid402 } from "./fast-paths.js";
+import { fastUnpaid402, NO_BODY, BAD_JSON } from "./fast-paths.js";
 const PAID = /^\/v1\/(pa|vat|counterparty)(\/?$)/;
 let freeApp = null;
 export const unpaid402 = new PlainCache(500, 3600_000);
@@ -18,7 +18,11 @@ const isBrowser = req => (req.headers.get("accept") || "").includes("text/html")
 const hasPayment = req => req.headers.has("payment-signature") || req.headers.has("x-payment");
 const toResponse = e => new Response(e.body, { status: e.status, headers: e.headers });
 
+// Hono's 404 for methods the paid routes don't serve (POST /v1/pa ...): no app or x402 server needed (byte-checked in tests).
+const notFound = () => new Response("404 Not Found", { status: 404, headers: { "content-type": "text/plain; charset=UTF-8" } });
+
 export async function paidRoute(req, env, ctx, log = null) {
+  if (req.method !== "GET" && req.method !== "HEAD" && !hasPayment(req)) { if (log) log.fast_404 = true; return notFound(); }
   if (req.method !== "GET" || hasPayment(req)) return createApp(env, log).fetch(req, env, ctx);
   const browser = isBrowser(req);
   const key = (browser ? "h " : "j ") + req.url;
@@ -34,7 +38,10 @@ export async function paidRoute(req, env, ctx, log = null) {
 }
 
 function route(req, env, ctx, path, log, mcpMsg) {
-  if (path === "/mcp") return handleMcp(req, env, log, mcpMsg);
+  if (path === "/mcp") return handleMcp(req, env, log, mcpMsg).then(res => {
+    if (log && !log.mcp_fast) Object.assign(log, mcpSdkShape(req, mcpMsg));
+    return res;
+  });
   if (PAID.test(path)) return paidRoute(req, env, ctx, log);
   freeApp ??= createApp({ ...env, DISABLE_PAYMENTS: "1", FREE_ONLY: "1" });
   return freeApp.fetch(req, env, ctx);
@@ -44,13 +51,20 @@ function route(req, env, ctx, path, log, mcpMsg) {
 // (JSON-RPC method, tool name). Batches report the first message. Bodies over 64 KB are not parsed (CPU).
 // msg is undefined when not parsed, which sends the request down the SDK path.
 export async function mcpBody(req) {
-  if (req.method !== "POST" || +(req.headers.get("content-length") || 0) > 65536) return { info: {}, msg: undefined };
+  if (req.method !== "POST" || +(req.headers.get("content-length") || 0) > 65536) return { info: {}, msg: NO_BODY };
   let msg;
-  try { msg = JSON.parse(await req.clone().text()); } catch { return { info: { mcp_method: "unparsable" }, msg: undefined }; }
+  try { msg = JSON.parse(await req.clone().text()); } catch { return { info: { mcp_method: "unparsable" }, msg: BAD_JSON }; }
   const m = Array.isArray(msg) ? msg[0] : msg;
   const o = { mcp_method: typeof m?.method === "string" ? m.method.slice(0, 60) : null };
   if (o.mcp_method === "tools/call") { o.tool = String(m.params?.name ?? "").slice(0, 60); o.has_mcp_payment = !!m.params?._meta?.["x402/payment"]; }
   return { info: o, msg };
+}
+// Shape of an MCP request the fast path declined (for the next round of fast paths). No values, no headers beyond these.
+export function mcpSdkShape(req, msg) {
+  const m = Array.isArray(msg) ? msg[0] : msg;
+  return { mcp_sdk: true, mcp_pv: (req.headers.get("mcp-protocol-version") || "").slice(0, 20) || null,
+    mcp_batch: Array.isArray(msg) || undefined, mcp_params: m && typeof m === "object" && m.params && typeof m.params === "object" ? Object.keys(m.params).slice(0, 6).join(",") : null,
+    mcp_id_type: m && typeof m === "object" && "id" in m ? (m.id === null ? "null" : typeof m.id) : null };
 }
 export const mcpInfo = async req => (await mcpBody(req)).info;
 

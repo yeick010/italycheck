@@ -17,7 +17,10 @@ const OUT = join(ROOT, "bench", ".out", "worker.mjs");
 const arg = (k, d) => { const i = process.argv.indexOf(k); return i > 0 ? process.argv[i + 1] : d; };
 export const SCENARIOS = ["free_root", "not_found_404", "pa_unpaid_402_same_url", "pa_unpaid_402_new_url", "mcp_initialize",
   "mcp_notifications_initialized", "mcp_tools_list", "mcp_tools_call_unpaid", "pa_paid_ok", "mcp_paid_ok", "pa_payment_garbage",
-  "cp_unpaid_402_same_url", "cp_unpaid_402_new_url", "mcp_tools_call_unpaid_cp", "cp_paid_ok", "mcp_paid_cp_ok"];
+  "cp_unpaid_402_same_url", "cp_unpaid_402_new_url", "mcp_tools_call_unpaid_cp", "cp_paid_ok", "mcp_paid_cp_ok",
+  // Shapes that reached the MCP SDK / paid app in production (logs 13-20/11/2026):
+  "mcp_head_405", "mcp_get_406", "mcp_get_sse", "mcp_post_bad_accept_406", "mcp_tools_list_meta", "mcp_tools_list_cursor",
+  "mcp_server_discover_pv400", "mcp_server_discover_32601", "mcp_prompts_list", "mcp_notification_pv400", "pa_post_404"];
 
 if (process.argv[2] === "--child") {
   const [, , , scenario, n] = process.argv;
@@ -114,13 +117,26 @@ async function child(scenario, n) {
     pa_paid_ok: () => new Request(B + "/v1/pa?cf=80016350821", { headers: { "payment-signature": paHeader } }),
     mcp_paid_ok: () => mcpReq({ method: "tools/call", params: { name: "lookup_italian_pa", arguments: { cf: "80016350821" }, _meta: mcpMeta } }),
     cp_unpaid_402_same_url: () => new Request(B + "/v1/counterparty?id=80016350821"),
+    mcp_head_405: () => new Request(B + "/mcp", { method: "HEAD" }),
+    mcp_get_406: () => new Request(B + "/mcp", { headers: { accept: "*/*" } }),
+    mcp_get_sse: () => new Request(B + "/mcp", { headers: { accept: "text/event-stream" } }),
+    mcp_post_bad_accept_406: () => new Request(B + "/mcp", { method: "POST", body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }), headers: { "content-type": "application/json", accept: "application/json" } }),
+    mcp_tools_list_meta: () => mcpReq({ method: "tools/list", params: { _meta: { progressToken: 1 } } }),
+    mcp_tools_list_cursor: () => mcpReq({ method: "tools/list", params: { cursor: "x" } }),
+    mcp_server_discover_pv400: () => new Request(B + "/mcp", { method: "POST", body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "server/discover" }),
+      headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "mcp-protocol-version": "2026-06-01" } }),
+    mcp_server_discover_32601: () => mcpReq({ method: "server/discover" }),
+    mcp_prompts_list: () => mcpReq({ method: "prompts/list" }),
+    mcp_notification_pv400: () => new Request(B + "/mcp", { method: "POST", body: JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }),
+      headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "mcp-protocol-version": "2026-06-01" } }),
+    pa_post_404: () => new Request(B + "/v1/pa?cf=80016350821", { method: "POST", body: "{}" }),
     cp_unpaid_402_new_url: () => new Request(B + `/v1/counterparty?id=${String(80016350821 + i++).padStart(11, "0")}`),
     mcp_tools_call_unpaid_cp: () => mcpReq({ method: "tools/call", params: { name: "verify_italian_counterparty", arguments: { id: "80016350821" } } }),
     cp_paid_ok: () => new Request(B + "/v1/counterparty?id=80016350821", { headers: { "payment-signature": paHeader } }),
     mcp_paid_cp_ok: () => mcpReq({ method: "tools/call", params: { name: "verify_italian_counterparty", arguments: { id: "80016350821" }, _meta: mcpMeta } }),
     pa_payment_garbage: () => new Request(B + "/v1/pa?cf=80016350821", { headers: { "payment-signature": "garbage" } }),
   }[scenario];
-  const once = async () => { const req = make(); const a = cpu(); const r = await worker.fetch(req, env, { waitUntil() {} }); await r.text(); return [cpu() - a, r.status]; };
+  const once = async () => { const req = make(); const a = cpu(); const r = await worker.fetch(req, env, { waitUntil() {} }); if (scenario === "mcp_get_sse") await r.body?.cancel(); else await r.text(); return [cpu() - a, r.status]; };
   const [cold, status] = await once();
   const warm = [];
   for (let k = 0; k < n; k++) warm.push((await once())[0]);

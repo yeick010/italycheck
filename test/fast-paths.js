@@ -69,11 +69,11 @@ await cmp("ping", { jsonrpc: "2.0", id: 7, method: "ping" });
 await cmp("tools/list", { jsonrpc: "2.0", id: 2, method: "tools/list" }, undefined, { "mcp-protocol-version": "2025-06-18" });
 await cmp("tools/list PRICE_PA $0.01", { jsonrpc: "2.0", id: 2, method: "tools/list" }, { X402_NETWORK: "eip155:8453", PRICE_PA: "$0.01" });
 await cmp("tools/list free mode", { jsonrpc: "2.0", id: 2, method: "tools/list" }, { DISABLE_PAYMENTS: "1" });
-await cmp("tools/list with cursor param", { jsonrpc: "2.0", id: 2, method: "tools/list", params: { cursor: "x" } }, undefined, {}, false);
-await cmp("unsupported protocol header", { jsonrpc: "2.0", id: 2, method: "tools/list" }, undefined, { "mcp-protocol-version": "1999-01-01" }, false);
-await cmp("bad accept header", { jsonrpc: "2.0", id: 2, method: "tools/list" }, undefined, { accept: "application/json" }, false);
+await cmp("tools/list with cursor param", { jsonrpc: "2.0", id: 2, method: "tools/list", params: { cursor: "x" } }, undefined, {}, true);
+await cmp("unsupported protocol header", { jsonrpc: "2.0", id: 2, method: "tools/list" }, undefined, { "mcp-protocol-version": "1999-01-01" }, true);
+await cmp("bad accept header", { jsonrpc: "2.0", id: 2, method: "tools/list" }, undefined, { accept: "application/json" }, true);
 await cmp("batch request", [{ jsonrpc: "2.0", id: 2, method: "tools/list" }], undefined, {}, false);
-await cmp("prompts/list (not supported)", { jsonrpc: "2.0", id: 3, method: "prompts/list" }, undefined, {}, false);
+await cmp("prompts/list (not supported, now fast -32601)", { jsonrpc: "2.0", id: 3, method: "prompts/list" }, undefined, {}, true);
 { _resetMcpCache?.();
   const call = (cf = "80016350821", extra = {}) => ({ jsonrpc: "2.0", id: 9, method: "tools/call", params: { name: "lookup_italian_pa", arguments: { cf }, ...extra } });
   const fake = { content: [{ type: "text", text: "{\"x402Version\":2}" }], structuredContent: { x402Version: 2, accepts: [] }, isError: true };
@@ -82,6 +82,87 @@ await cmp("prompts/list (not supported)", { jsonrpc: "2.0", id: 3, method: "prom
   await cmp("tools/call unpaid, other cf", call("00743110157"));
   await cmp("tools/call validate_vat (falls back)", { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "validate_vat", arguments: { piva: "IT00743110157" } } }, undefined, {}, false);
   _resetMcpCache?.(); }
+
+
+// ── Transport-level fast paths (2026-11-20): same bytes as the SDK transport for each shape seen in production logs ──
+{ const { mcpBody } = await import("../src/worker.js");
+  const env = { X402_NETWORK: "eip155:8453" };
+  const mk = (method, headers = {}, body) => () => new Request(MCP, { method, headers, ...(body !== undefined ? { body: typeof body === "string" ? body : JSON.stringify(body) } : {}) });
+  async function cmpT(name, make, expectFast = true) {
+    const r1 = make(), log = {};
+    const fast = await snap(await handleMcp(r1, env, log, (await mcpBody(r1)).msg));
+    const sdk = await snap(await handleMcp(make(), env));
+    ok(`MCP ${name}: ${expectFast ? "fast" : "fallback"} == SDK`, same(fast, sdk) && !!log.mcp_fast === expectFast,
+      same(fast, sdk) ? `fast=${!!log.mcp_fast} status=${fast.status}` : `\n   fast=${JSON.stringify(fast).slice(0, 400)}\n   sdk =${JSON.stringify(sdk).slice(0, 400)}`);
+  }
+  const J = { "content-type": "application/json", accept: "application/json, text/event-stream" };
+  const call = (method, params, id = 5) => ({ jsonrpc: "2.0", id, method, ...(params !== undefined ? { params } : {}) });
+  for (const m of ["HEAD", "PUT", "PATCH", "OPTIONS"]) await cmpT(`${m} /mcp -> 405`, mk(m, m === "HEAD" || m === "OPTIONS" ? {} : J, m === "HEAD" || m === "OPTIONS" ? undefined : "{}"));
+  await cmpT("GET /mcp no accept -> 406", mk("GET"));
+  await cmpT("GET /mcp text/html -> 406", mk("GET", { accept: "text/html,application/xhtml+xml", "user-agent": "Mozilla/5.0" }));
+  await cmpT("GET /mcp event-stream + bad protocol header -> 400", mk("GET", { accept: "text/event-stream", "mcp-protocol-version": "2099-01-01" }));
+  { const r1 = mk("GET", { accept: "text/event-stream" })(), log = {};
+    const f = await handleMcp(r1, env, log, (await mcpBody(r1)).msg), sdk = await handleMcp(mk("GET", { accept: "text/event-stream" })(), env);
+    const h = r => JSON.stringify([r.status, [...r.headers]]);
+    ok("MCP GET /mcp event-stream: fast SSE stream, same status + headers as SDK", log.mcp_fast === true && h(f) === h(sdk), `${h(f)} vs ${h(sdk)}`);
+    await f.body.cancel(); await sdk.body.cancel(); }
+  await cmpT("POST no accept -> 406", mk("POST", { "content-type": "application/json" }, call("tools/list")));
+  await cmpT("POST accept json only -> 406", mk("POST", { "content-type": "application/json", accept: "application/json" }, call("tools/list")));
+  await cmpT("POST text/plain -> 415", mk("POST", { ...J, "content-type": "text/plain" }, call("tools/list")));
+  await cmpT("POST application/json-rpc -> 415", mk("POST", { ...J, "content-type": "application/json-rpc" }, call("tools/list")));
+  await cmpT("POST charset param ok", mk("POST", { ...J, "content-type": "Application/JSON; charset=utf-8" }, call("tools/list")));
+  await cmpT("POST invalid JSON -> 400", mk("POST", J, "{not json"));
+  await cmpT("POST empty body -> 400", mk("POST", J, ""));
+  await cmpT("POST JSON number -> invalid JSON-RPC 400", mk("POST", J, "42"));
+  await cmpT("POST jsonrpc 1.0 -> invalid JSON-RPC 400", mk("POST", J, { jsonrpc: "1.0", id: 1, method: "tools/list" }));
+  await cmpT("POST {} -> invalid JSON-RPC 400", mk("POST", J, {}));
+  await cmpT("POST id null (fallback)", mk("POST", J, { jsonrpc: "2.0", id: null, method: "tools/list" }), false);
+  const PV = { ...J, "mcp-protocol-version": "2026-06-01" };
+  await cmpT("server/discover + unsupported protocol header -> 400", mk("POST", PV, call("server/discover")));
+  await cmpT("tools/list + unsupported protocol header -> 400", mk("POST", PV, call("tools/list")));
+  await cmpT("notification + unsupported protocol header -> 400", mk("POST", PV, { jsonrpc: "2.0", method: "notifications/initialized" }));
+  await cmpT("initialize ignores unsupported protocol header", mk("POST", PV, call("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "x", version: "1" } })));
+  await cmpT("initialize 2026 version in body -> latest", mk("POST", J, call("initialize", { protocolVersion: "2026-06-01", capabilities: { roots: { listChanged: true } }, clientInfo: { name: "x", version: "1" } })));
+  for (const meth of ["server/discover", "prompts/list", "prompts/get", "resources/list", "resources/templates/list", "resources/read", "completion/complete", "logging/setLevel"]) {
+    await cmpT(`${meth} -> -32601`, mk("POST", J, call(meth)));
+    await cmpT(`${meth} with params -> -32601`, mk("POST", { ...J, "mcp-protocol-version": "2025-06-18" }, call(meth, { cursor: "a", _meta: { progressToken: 1 } }, "s1")));
+  }
+  await cmpT("tools/list cursor", mk("POST", J, call("tools/list", { cursor: "abc" })));
+  await cmpT("tools/list _meta", mk("POST", J, call("tools/list", { _meta: { progressToken: "t" } })));
+  await cmpT("tools/list cursor + _meta, string id", mk("POST", J, call("tools/list", { cursor: "x", _meta: {} }, "req-1")));
+  await cmpT("tools/list cursor null (fallback)", mk("POST", J, call("tools/list", { cursor: null })), false);
+  await cmpT("tools/list unknown param (fallback)", mk("POST", J, call("tools/list", { foo: 1 })), false);
+  await cmpT("ping _meta", mk("POST", J, call("ping", { _meta: { progressToken: 2 } })));
+  await cmpT("notifications/cancelled -> 202", mk("POST", J, { jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: 1 } }));
+  await cmpT("unknown notification -> 202", mk("POST", J, { jsonrpc: "2.0", method: "notifications/whatever" }));
+  await cmpT("batch (fallback)", mk("POST", J, [call("tools/list")]), false);
+  await cmpT("DELETE (fallback)", mk("DELETE", { accept: "application/json, text/event-stream" }), false);
+  await cmpT("tools/call check_partita_iva_format (fallback)", mk("POST", J, call("tools/call", { name: "check_partita_iva_format", arguments: { piva: "00743110157" } })), false);
+  await cmpT("unknown request method (fallback)", mk("POST", J, call("tasks/list")), false);
+  // POST /v1/pa and /v1/counterparty: Hono 404 without building the paid app
+  for (const path of ["/v1/pa?cf=80016350821", "/v1/counterparty?id=80016350821"]) {
+    const u = "https://italycheck.example" + path, log = {};
+    const fast = await snap(await paidRoute(new Request(u, { method: "POST", body: "{}" }), env, {}, log));
+    const lib = await snap(await createApp(env).fetch(new Request(u, { method: "POST", body: "{}" }), env));
+    ok(`POST ${path.split("?")[0]} -> fast 404 == library`, same(fast, lib) && log.fast_404 === true, JSON.stringify(fast).slice(0, 160));
+  }
+}
+
+
+// ── Worker entry: transport fast paths + SDK-shape log fields ──
+{ const worker = (await import("../src/worker.js")).default;
+  const env = { X402_NETWORK: "eip155:8453" }, logs = [], orig = console.log;
+  console.log = (o, ...r) => typeof o === "object" ? logs.push(o) : orig(o, ...r);
+  try {
+    const h = await worker.fetch(new Request(MCP, { method: "HEAD" }), env, {});
+    ok("worker HEAD /mcp -> 405 fast", h.status === 405 && logs.at(-1).mcp_fast === true && !logs.at(-1).mcp_sdk);
+    const b = await worker.fetch(new Request(MCP, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "mcp-protocol-version": "2025-06-18" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "check_partita_iva_format", arguments: { piva: "00743110157" } } }) }), env, {});
+    const l = logs.at(-1);
+    ok("worker SDK-path request logs its shape (pv, param keys, id type)", b.status === 200 && l.mcp_sdk === true && l.mcp_pv === "2025-06-18" && l.mcp_params === "name,arguments" && l.mcp_id_type === "number", JSON.stringify(l));
+    const p = await worker.fetch(new Request("https://italycheck.example/v1/pa?cf=80016350821", { method: "POST" }), env, {});
+    ok("worker POST /v1/pa -> 404 fast", p.status === 404 && logs.at(-1).fast_404 === true);
+  } finally { console.log = orig; } }
 
 // ── Revenue state from on-chain logs (mock RPC) ──
 { const pad = a => "0x" + a.toLowerCase().slice(2).padStart(64, "0");
