@@ -15,7 +15,7 @@ import { fastUnpaid402, fastMcp, mcpUnpaid } from "./fast-paths.js";
 const createApp = async (...a) => (await import("./app.js")).createApp(...a);
 const handleMcp = async (...a) => (await import("./remote-mcp.js")).handleMcp(...a);
 const cachedUnpaid = url => { const hit = mcpUnpaid.get(url); return hit && structuredClone(hit); };
-const PAID = /^\/v1\/(pa|vat)(\/?$)/;
+const PAID = /^\/v1\/(pa|vat|counterparty)(\/?$)/;
 let freeApp = null;
 export const unpaid402 = new PlainCache(500, 3600_000);
 

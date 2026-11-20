@@ -82,7 +82,7 @@ try { validateBazaarRouteExtensions(createApp.__routes ?? {}); ok("bazaar valida
   const l1 = await (await handleMcp(rpc({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }), env)).json();
   const pr1 = JSON.parse(c1).result?.structuredContent;
   ok("MCP unpaid tools/call: cache hit == miss", c1 === c2 && mcpUnpaid.size === 1 && pr1?.accepts?.length === 2 && pr1.accepts[0].extra?.name === "USDC" && pr1.accepts[1].extra?.name === "EURC", `accepts=${pr1?.accepts?.length}`);
-  ok("MCP tools/list has both tools", l1.result?.tools?.map(x => x.name).join(",") === "check_partita_iva_format,lookup_italian_pa");
+  ok("MCP tools/list has all three tools", l1.result?.tools?.map(x => x.name).join(",") === "check_partita_iva_format,lookup_italian_pa,verify_italian_counterparty");
 }
 
 // Payment failures against a mock facilitator (CDP style: HTTP 400 {isValid:false} is thrown as VerifyError).

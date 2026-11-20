@@ -5,11 +5,12 @@ import { ExactEvmScheme } from "@x402/evm/exact/server";
 import { HTTPFacilitatorClient } from "@x402/core/server";
 import { createFacilitatorConfig } from "@coinbase/x402";
 import { declareDiscoveryExtension, bazaarResourceServerExtension } from "@x402/extensions/bazaar";
-import { viesCheck, ipaLookup } from "./core.js";
-import { addFreeRoutes } from "./free-app.js";
+import { viesCheck, ipaLookup, counterpartyCheck } from "./core.js";
 import { logPayment } from "./payments.js";
-import { DESCRIPTIONS, EURC, PA_DISCOVERY, acceptsFor } from "./constants.js";
-export { DESCRIPTIONS, EURC, PA_DISCOVERY, acceptsFor }; // moved to constants.js (no imports); re-exported for callers
+import { addFreeRoutes } from "./free-app.js";
+import { DESCRIPTIONS, EURC, PA_DISCOVERY, COUNTERPARTY_DISCOVERY, PRICE_COUNTERPARTY_DEFAULT, priceCounterparty, acceptsFor } from "./constants.js";
+// Moved to constants.js (no imports); re-exported for existing callers.
+export { DESCRIPTIONS, EURC, PA_DISCOVERY, COUNTERPARTY_DISCOVERY, PRICE_COUNTERPARTY_DEFAULT, priceCounterparty, acceptsFor };
 
 // Cache only plain data (never promises) across requests: Workers forbid awaiting I/O from another request.
 let supportedCache = null;
@@ -50,7 +51,6 @@ export function createApp(env = {}, log = null) {
   const network = netOf(env), payTo = payToOf(env);
   const vatOn = env.ENABLE_VAT === "1"; // VIES off by default pending legal review
   const app = new Hono();
-
   addFreeRoutes(app, env); // GET /, GET /v1/vat/format (src/free-app.js)
 
   if (env.DISABLE_PAYMENTS !== "1") {
@@ -61,11 +61,15 @@ export function createApp(env = {}, log = null) {
       ...(vatOn ? { "GET /v1/vat": { accepts: [{ scheme: "exact", price: env.PRICE_VAT || "$0.01", network, payTo }], description: DESCRIPTIONS.vat, mimeType: "application/json" } } : {}),
       "GET /v1/pa": { accepts: acceptsFor(env.PRICE_PA || "$0.005", network, payTo, env), description: DESCRIPTIONS.pa, mimeType: "application/json",
         extensions: declareDiscoveryExtension(PA_DISCOVERY) },
+      "GET /v1/counterparty": { accepts: acceptsFor(priceCounterparty(env), network, payTo, env), description: DESCRIPTIONS.counterparty, mimeType: "application/json",
+        extensions: declareDiscoveryExtension(COUNTERPARTY_DISCOVERY) },
     }, server));
   }
 
   if (env.FREE_ONLY === "1") return app; // safety: free app never serves paid routes
   if (vatOn) app.get("/v1/vat", async c => c.json(await viesCheck(c.req.query("vat"))));
   app.get("/v1/pa", async c => c.json(await ipaLookup(c.req.query("cf"))));
+  // Non-200 (bad input, wrong check digit, IndicePA down) -> the x402 middleware does not settle: not charged.
+  app.get("/v1/counterparty", async c => { const { httpStatus, ...body } = await counterpartyCheck(c.req.query("id")); return c.json(body, httpStatus); });
   return app;
 }

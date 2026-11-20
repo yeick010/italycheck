@@ -16,7 +16,8 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const OUT = join(ROOT, "bench", ".out", "worker.mjs");
 const arg = (k, d) => { const i = process.argv.indexOf(k); return i > 0 ? process.argv[i + 1] : d; };
 export const SCENARIOS = ["free_root", "not_found_404", "pa_unpaid_402_same_url", "pa_unpaid_402_new_url", "mcp_initialize",
-  "mcp_notifications_initialized", "mcp_tools_list", "mcp_tools_call_unpaid", "pa_paid_ok", "mcp_paid_ok", "pa_payment_garbage"];
+  "mcp_notifications_initialized", "mcp_tools_list", "mcp_tools_call_unpaid", "pa_paid_ok", "mcp_paid_ok", "pa_payment_garbage",
+  "cp_unpaid_402_same_url", "cp_unpaid_402_new_url", "mcp_tools_call_unpaid_cp", "cp_paid_ok", "mcp_paid_cp_ok"];
 
 if (process.argv[2] === "--child") {
   const [, , , scenario, n] = process.argv;
@@ -51,11 +52,15 @@ async function child(scenario, n) {
   const env = { X402_NETWORK: NET, PAY_TO: "0xde8380854ef9c926093832501d95a47f4c63fe7c", ENABLE_VAT: "0", PRICE_PA: "$0.005",
     CDP_API_KEY_ID: "bench-key-id", CDP_API_KEY_SECRET: secret };
   const json = (o, status = 200) => new Response(JSON.stringify(o), { status, headers: { "content-type": "application/json" } });
-  const IPA = { result: { records: [{ Codice_IPA: "c_g273", Denominazione_ente: "Comune di Palermo", Tipologia: "Pubbliche Amministrazioni", Codice_ateco: "84.11.10",
+  // Counterparty: Palermo-sized answer (78 e-invoicing offices, the real count on 20/11/2026).
+  const UO = { success: true, result: { total: 78, records: Array.from({ length: 78 }, (_, i) => ({ Codice_IPA: "c_g273", Codice_uni_uo: "UF" + String(i).padStart(4, "0"),
+    Descrizione_uo: "Ufficio di esempio numero " + i + " - Direzione Amministrativa", Codice_fiscale_sfe: "80016350821", Data_avvio_sfe: "2015-03-31", Cod_peppol: null,
+    Indirizzo: "Via Roma " + i, CAP: "90100", Mail1: `uff${i}@cert.comune.palermo.it`, Tipo_Mail1: i % 2 ? "Pec" : "Altro", Data_aggiornamento: "2025-12-10" })) } };
+  const IPA = { success: true, result: { records: [{ Codice_IPA: "c_g273", Denominazione_ente: "Comune di Palermo", Tipologia: "Pubbliche Amministrazioni", Codice_ateco: "84.11.10",
     Indirizzo: "Piazza Pretoria, 1", CAP: "90133", Sito_istituzionale: "www.comune.palermo.it", Tipo_Mail1: "Pec", Mail1: "protocollo@cert.comune.palermo.it" }] } };
   globalThis.fetch = async (u) => {
     const url = String(u?.url ?? u);
-    if (url.includes("indicepa")) return json(IPA);
+    if (url.includes("indicepa")) return json(url.includes("57bd2be0-4d3d-41cd-bdb8-2f0a60d6f490") ? UO : IPA);
     if (url.endsWith("/supported")) return json({ kinds: [{ x402Version: 2, scheme: "exact", network: NET }], extensions: ["bazaar"], signers: {} });
     if (url.endsWith("/verify")) return json({ isValid: true, payer: PAYER.address });
     if (url.endsWith("/settle")) return json({ success: true, transaction: "0x" + "ab".repeat(32), network: NET, payer: PAYER.address });
@@ -85,6 +90,15 @@ async function child(scenario, n) {
     const r = await (await worker.fetch(mcpReq({ method: "tools/call", params: { name: "lookup_italian_pa", arguments: { cf: "99999999999" } } }), env, {})).json();
     mcpMeta = { "x402/payment": await client.createPaymentPayload(r.result.structuredContent) };
   }
+  if (scenario === "cp_paid_ok") {
+    const r = await worker.fetch(new Request(B + "/v1/counterparty?id=99999999999"), env, {});
+    const pr = JSON.parse(Buffer.from(r.headers.get("payment-required"), "base64").toString());
+    paHeader = Buffer.from(JSON.stringify(await client.createPaymentPayload(pr))).toString("base64");
+  }
+  if (scenario === "mcp_paid_cp_ok") {
+    const r = await (await worker.fetch(mcpReq({ method: "tools/call", params: { name: "verify_italian_counterparty", arguments: { id: "99999999999" } } }), env, {})).json();
+    mcpMeta = { "x402/payment": await client.createPaymentPayload(r.result.structuredContent) };
+  }
   // ^ these warm-up calls only happen for paid scenarios; they make "cold" for paid = first PAID request after one unpaid one.
   let i = 0;
   const make = {
@@ -99,6 +113,11 @@ async function child(scenario, n) {
     mcp_tools_call_unpaid: () => mcpReq({ method: "tools/call", params: { name: "lookup_italian_pa", arguments: { cf: "80016350821" } } }),
     pa_paid_ok: () => new Request(B + "/v1/pa?cf=80016350821", { headers: { "payment-signature": paHeader } }),
     mcp_paid_ok: () => mcpReq({ method: "tools/call", params: { name: "lookup_italian_pa", arguments: { cf: "80016350821" }, _meta: mcpMeta } }),
+    cp_unpaid_402_same_url: () => new Request(B + "/v1/counterparty?id=80016350821"),
+    cp_unpaid_402_new_url: () => new Request(B + `/v1/counterparty?id=${String(80016350821 + i++).padStart(11, "0")}`),
+    mcp_tools_call_unpaid_cp: () => mcpReq({ method: "tools/call", params: { name: "verify_italian_counterparty", arguments: { id: "80016350821" } } }),
+    cp_paid_ok: () => new Request(B + "/v1/counterparty?id=80016350821", { headers: { "payment-signature": paHeader } }),
+    mcp_paid_cp_ok: () => mcpReq({ method: "tools/call", params: { name: "verify_italian_counterparty", arguments: { id: "80016350821" }, _meta: mcpMeta } }),
     pa_payment_garbage: () => new Request(B + "/v1/pa?cf=80016350821", { headers: { "payment-signature": "garbage" } }),
   }[scenario];
   const once = async () => { const req = make(); const a = cpu(); const r = await worker.fetch(req, env, { waitUntil() {} }); await r.text(); return [cpu() - a, r.status]; };

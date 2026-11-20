@@ -91,7 +91,10 @@ await cmp("prompts/list (not supported)", { jsonrpc: "2.0", id: 3, method: "prom
   const fp = await import("../src/fast-paths.js");
   const decl = bz.declareDiscoveryExtension(c.PA_DISCOVERY);
   const lib = { ...decl, bazaar: bz.bazaarResourceServerExtension.enrichDeclaration(decl.bazaar, { method: "GET", adapter: null, path: "/v1/pa" }) };
-  ok("Bazaar /v1/pa declaration == library (same keys order)", JSON.stringify(fp.paBazaarExtensions()) === JSON.stringify(lib));
+  ok("Bazaar /v1/pa declaration == library (same keys order)", JSON.stringify(fp.bazaarExtensions(c.PA_DISCOVERY)) === JSON.stringify(lib));
+  const decl2 = bz.declareDiscoveryExtension(c.COUNTERPARTY_DISCOVERY);
+  const lib2 = { ...decl2, bazaar: bz.bazaarResourceServerExtension.enrichDeclaration(decl2.bazaar, { method: "GET", adapter: null, path: "/v1/counterparty" }) };
+  ok("Bazaar /v1/counterparty declaration == library (same keys order)", JSON.stringify(fp.bazaarExtensions(c.COUNTERPARTY_DISCOVERY)) === JSON.stringify(lib2));
   const http = await import("@x402/core/http");
   const sample = { x402Version: 2, error: "Payment required", resource: { url: "https://x.example/v1/pa?cf=1", description: "àèìòù € 日本 \u{1F600}" }, accepts: [], big: "x".repeat(70000) };
   ok("payment-required header encoding == @x402/core/http (UTF-8, >32 KB)", fp.encodePaymentRequiredHeader(sample) === http.encodePaymentRequiredHeader(sample));
@@ -100,7 +103,7 @@ await cmp("prompts/list (not supported)", { jsonrpc: "2.0", id: 3, method: "prom
   const fa = await import("../src/free-app.js");
   let freeSame = true;
   for (const e of [{ X402_NETWORK: "eip155:8453" }, { X402_NETWORK: "eip155:84532", ENABLE_VAT: "1", PRICE_PA: "$0.01" }])
-    for (const u of ["/", "/v1/vat/format?vat=IT00743110157", "/v1/vat/format", "/robots.txt", "/v1/pa?cf=80016350821"]) {
+    for (const u of ["/", "/v1/vat/format?vat=IT00743110157", "/v1/vat/format", "/robots.txt", "/v1/pa?cf=80016350821", "/v1/counterparty?id=80016350821"]) {
       const a = await snap(await fa.createFreeApp(e).fetch(new Request("https://italycheck.example" + u), e));
       const b = await snap(await app.createApp({ ...e, DISABLE_PAYMENTS: "1", FREE_ONLY: "1" }).fetch(new Request("https://italycheck.example" + u), e));
       if (!same(a, b)) { freeSame = false; console.log("   differs:", u, JSON.stringify(a).slice(0, 200), JSON.stringify(b).slice(0, 200)); }
@@ -124,10 +127,14 @@ await cmp("prompts/list (not supported)", { jsonrpc: "2.0", id: 3, method: "prom
     const pr = JSON.parse(atob(pa.headers.get("payment-required")));
     ok("worker /v1/pa -> 402, 5000 USDC + EURC to PAY_TO, fast path", pa.status === 402 && logs.at(-1).fast_402 === true
       && same(pr.accepts.map(a => [a.amount, a.asset, a.payTo]), [["5000", "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", env.PAY_TO], ["5000", "0x60a3E35Cc302bFA44Cb288Bc5a4F316Fdb1adb42", env.PAY_TO]]));
+    const cp = await worker.fetch(new Request("https://italycheck.example/v1/counterparty?id=80016350821"), env, {});
+    const cpr = JSON.parse(atob(cp.headers.get("payment-required")));
+    ok("worker /v1/counterparty -> 402, 10000 USDC + EURC to PAY_TO, fast path", cp.status === 402 && logs.at(-1).fast_402 === true
+      && same(cpr.accepts.map(a => [a.amount, a.asset, a.payTo]), [["10000", "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", env.PAY_TO], ["10000", "0x60a3E35Cc302bFA44Cb288Bc5a4F316Fdb1adb42", env.PAY_TO]]));
     const init = await worker.fetch(req({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "1" } } }), env, {});
     ok("worker /mcp initialize -> fast 200", init.status === 200 && (await init.json()).result.serverInfo.name === "italycheck" && logs.at(-1).mcp_fast === true);
     const tl = await worker.fetch(req({ jsonrpc: "2.0", id: 2, method: "tools/list" }), env, {});
-    ok("worker /mcp tools/list -> fast, 2 tools", tl.status === 200 && (await tl.json()).result.tools.length === 2 && logs.at(-1).mcp_fast === true);
+    ok("worker /mcp tools/list -> fast, 3 tools", tl.status === 200 && (await tl.json()).result.tools.length === 3 && logs.at(-1).mcp_fast === true);
     const pl = await worker.fetch(req({ jsonrpc: "2.0", id: 3, method: "prompts/list" }), env, {});
     const plj = await pl.json();
     ok("worker /mcp prompts/list -> SDK path (lazily imported), JSON-RPC error", !logs.at(-1).mcp_fast && plj.error?.code === -32601, JSON.stringify(plj).slice(0, 120));
