@@ -40,3 +40,23 @@ Re-measure p99 after deploy with enough requests (see `/workspace/deploy-check/c
 ## Deploy (only with Yeison's confirmation)
 `scripts/deploy-with-rollback.sh <live-version-id> <commit>`: tests, dry-run build, live-version check, deploy, smoke
 (`scripts/smoke.mjs`) x3, automatic rollback to `<live-version-id>` on failure. `DRY_RUN=1` stops before deploying.
+
+## Deploy outcome (20/11/2026, Europe/Rome): ROLLED BACK
+- 20:46:45 deploy of 93322e6 with `scripts/deploy-with-rollback.sh`: preflight 117/117 tests, version
+  `f523ccab-84b2-4704-a05c-c1b48d5d6528`, smoke all green (/, /mcp initialize + tools/list, /v1/pa 402 @5000, /v1/counterparty 402 @10000).
+- Watching the logs: fast-path requests were normal (19:47Z: 8 requests, avg 2.46 ms, max 7.84 ms), 0 errors, 0 exceededCpu.
+  But the two requests that took the SDK path paid the lazy load inside the request:
+  - 19:48Z `tools/list` without the fast path (SentinelOracle client): **110.97 ms** CPU
+  - 19:49Z `HEAD /mcp` → 405: **68.11 ms** CPU
+  The same `HEAD /mcp` → 405 on a6844a94 (static imports) cost at most 11.9–12.8 ms (minute max, 20/11 02:13Z and 15:46Z).
+- 20:51:55 manual `wrangler rollback` to `2f644f20-e939-47b5-ba1c-c33d1a07ad27`, smoke green again. main not moved (stays 86cb48b).
+
+**Conclusion:** on Cloudflare, top-level evaluation at isolate startup is NOT charged (or charged far less) to the request,
+while a dynamic import() evaluated inside a request is. The premise of this fix was wrong: lazy loading moves free startup
+work into billed request time. The 22 ms p99 comes from requests that take the library paths (SDK-path MCP, paid, browser
+402), not from startup.
+
+**Next proposal:** keep the static imports (eager evaluation at startup) and widen the plain-data fast paths for what still
+reaches the SDK: `HEAD`/`GET /mcp` (405), `tools/list` and `initialize` with headers the fast path rejects today, other
+discovery methods (`resources/list`, `prompts/list` → -32601). The dependency-free fast-paths/constants refactor from this
+branch can be kept, without the dynamic imports in worker.js / remote-mcp.js.
