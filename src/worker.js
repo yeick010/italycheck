@@ -5,10 +5,16 @@
 // Unpaid requests to paid routes (no PAYMENT-SIGNATURE / X-PAYMENT header) get a cached 402 (plain data:
 // status, headers, body text) keyed by full URL; built once per URL via the normal middleware path.
 // Free routes (catalog, format check) use one app per isolate WITHOUT payment middleware: no shared I/O.
-import { createApp } from "./app.js";
-import { handleMcp } from "./remote-mcp.js";
+// Cold isolates: only plain-data modules are imported statically (constants, cache, fast paths). The heavy graphs are
+// loaded with dynamic import() when a request needs them: app.js (Hono + @x402/* + @coinbase/x402) for paid routes,
+// free-app.js (Hono only) for free routes, remote-mcp.js (MCP SDK + zod) for MCP requests the fast path declines. Each import is evaluated once
+// per isolate. esbuild (wrangler) keeps one bundle but wraps lazily-imported modules so their top-level code runs on
+// first import, not at isolate startup.
 import { PlainCache } from "./cache.js";
-import { fastUnpaid402 } from "./fast-paths.js";
+import { fastUnpaid402, fastMcp, mcpUnpaid } from "./fast-paths.js";
+const createApp = async (...a) => (await import("./app.js")).createApp(...a);
+const handleMcp = async (...a) => (await import("./remote-mcp.js")).handleMcp(...a);
+const cachedUnpaid = url => { const hit = mcpUnpaid.get(url); return hit && structuredClone(hit); };
 const PAID = /^\/v1\/(pa|vat)(\/?$)/;
 let freeApp = null;
 export const unpaid402 = new PlainCache(500, 3600_000);
@@ -19,24 +25,29 @@ const hasPayment = req => req.headers.has("payment-signature") || req.headers.ha
 const toResponse = e => new Response(e.body, { status: e.status, headers: e.headers });
 
 export async function paidRoute(req, env, ctx, log = null) {
-  if (req.method !== "GET" || hasPayment(req)) return createApp(env, log).fetch(req, env, ctx);
+  if (req.method !== "GET" || hasPayment(req)) return (await createApp(env, log)).fetch(req, env, ctx);
   const browser = isBrowser(req);
   const key = (browser ? "h " : "j ") + req.url;
   const hit = unpaid402.get(key);
   if (hit) return toResponse(hit);
   const fast = browser ? null : fastUnpaid402(req.url, env); // plain data, no app/x402 server (CPU on cold isolates)
   if (fast) { if (log) log.fast_402 = true; unpaid402.set(key, fast); return toResponse(fast); }
-  const res = await createApp(env).fetch(req, env, ctx);
+  const res = await (await createApp(env)).fetch(req, env, ctx);
   if (res.status !== 402) return res;
   const e = { status: res.status, headers: [...res.headers], body: await res.text() };
   unpaid402.set(key, e);
   return toResponse(e);
 }
 
-function route(req, env, ctx, path, log, mcpMsg) {
-  if (path === "/mcp") return handleMcp(req, env, log, mcpMsg);
+async function route(req, env, ctx, path, log, mcpMsg) {
+  if (path === "/mcp") {
+    // Fast path here (before loading the SDK); remote-mcp.js re-checks it, so pass undefined to skip that.
+    const fast = mcpMsg !== undefined && fastMcp(req, mcpMsg, env, cachedUnpaid);
+    if (fast) { if (log) log.mcp_fast = true; return fast; }
+    return handleMcp(req, env, log, undefined);
+  }
   if (PAID.test(path)) return paidRoute(req, env, ctx, log);
-  freeApp ??= createApp({ ...env, DISABLE_PAYMENTS: "1", FREE_ONLY: "1" });
+  freeApp ??= (await import("./free-app.js")).createFreeApp(env); // = createApp({ ...env, DISABLE_PAYMENTS: "1", FREE_ONLY: "1" }), no x402
   return freeApp.fetch(req, env, ctx);
 }
 

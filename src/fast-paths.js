@@ -4,10 +4,39 @@
 //     tools/call: answered as plain JSON-RPC without constructing McpServer + zod + transport.
 // Both are byte-for-byte checked against the library output in test/run.js; anything unusual (other networks,
 // odd prices, browsers, batches, bad headers, unknown methods) returns null and takes the normal library path.
-import { encodePaymentRequiredHeader, PAYMENT_REQUIRED_CACHE_CONTROL } from "@x402/core/http";
-import { SUPPORTED_PROTOCOL_VERSIONS, LATEST_PROTOCOL_VERSION } from "@modelcontextprotocol/sdk/types.js";
-import { declareDiscoveryExtension, bazaarResourceServerExtension } from "@x402/extensions/bazaar";
-import { DESCRIPTIONS, EURC, PA_DISCOVERY } from "./app.js";
+// No library imports: this module is loaded eagerly by the Worker entry, while @x402/*, Hono, the MCP SDK and zod are
+// loaded with dynamic import() only on the library path. The few library pieces reproduced here (base64 header
+// encoding, MCP protocol versions, the Bazaar declaration for /v1/pa) are checked against the libraries in tests.
+import { DESCRIPTIONS, EURC, PA_DISCOVERY, MCP_SUPPORTED_PROTOCOL_VERSIONS as SUPPORTED_PROTOCOL_VERSIONS,
+  MCP_LATEST_PROTOCOL_VERSION as LATEST_PROTOCOL_VERSION } from "./constants.js";
+import { PlainCache } from "./cache.js";
+
+export const mcpUnpaid = new PlainCache(50, 3600_000); // resource URL -> payment-required tool result (filled by remote-mcp.js)
+
+// As @x402/core/http: PAYMENT_REQUIRED_CACHE_CONTROL and encodePaymentRequiredHeader (UTF-8 JSON -> base64).
+const PAYMENT_REQUIRED_CACHE_CONTROL = "no-store";
+export function encodePaymentRequiredHeader(pr) {
+  const bytes = new TextEncoder().encode(JSON.stringify(pr));
+  let bin = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(bin);
+}
+
+// What declareDiscoveryExtension(PA_DISCOVERY) + bazaarResourceServerExtension.enrichDeclaration(..., GET) return
+// (@x402/extensions/bazaar); deep-equal checked in test/fast-paths.js and byte-checked through the 402 tests.
+export function paBazaarExtensions() {
+  return { bazaar: {
+    info: { input: { type: "http", method: PA_DISCOVERY.method, queryParams: PA_DISCOVERY.input }, output: { type: "json", example: PA_DISCOVERY.output.example } },
+    schema: { $schema: "https://json-schema.org/draft/2020-12/schema", type: "object",
+      properties: {
+        input: { type: "object",
+          properties: { type: { type: "string", const: "http" }, method: { type: "string", enum: [PA_DISCOVERY.method] },
+            queryParams: { type: "object", ...PA_DISCOVERY.inputSchema } },
+          required: ["type", "method"], additionalProperties: false },
+        output: { type: "object", properties: { type: { type: "string" }, example: { type: "object" } }, required: ["type"] },
+      },
+      required: ["input"] } } };
+}
 
 // USDC per network as in @x402/evm DEFAULT_ASSETS (name/version = EIP-712 domain).
 const USDC = {
@@ -33,9 +62,7 @@ function pa402Template(env) {
   const opt = (asset, name, version) => ({ scheme: "exact", network, amount, asset, payTo, maxTimeoutSeconds: 300, extra: { name, version } });
   const accepts = [opt(usdc.asset, usdc.name, usdc.version)];
   if (EURC[network] && env.DISABLE_EURC !== "1") accepts.push(opt(EURC[network], "EURC", "2"));
-  // Same as the middleware: declaration, then the Bazaar server extension narrows input.method to the request method.
-  const decl = declareDiscoveryExtension(PA_DISCOVERY);
-  const extensions = { ...decl, bazaar: bazaarResourceServerExtension.enrichDeclaration(decl.bazaar, { method: "GET", adapter: null, path: "/v1/pa" }) };
+  const extensions = paBazaarExtensions(); // = middleware: declaration narrowed by the Bazaar server extension to GET
   const v = { description: DESCRIPTIONS.pa, accepts, extensions };
   pa402 = { k, v };
   return v;

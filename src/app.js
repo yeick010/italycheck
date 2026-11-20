@@ -1,16 +1,15 @@
+// Loaded lazily by src/worker.js (dynamic import): Hono + x402 are only evaluated when a request needs them.
 import { Hono } from "hono";
 import { paymentMiddleware, x402ResourceServer } from "@x402/hono";
 import { ExactEvmScheme } from "@x402/evm/exact/server";
 import { HTTPFacilitatorClient } from "@x402/core/server";
 import { createFacilitatorConfig } from "@coinbase/x402";
 import { declareDiscoveryExtension, bazaarResourceServerExtension } from "@x402/extensions/bazaar";
-import { viesCheck, ipaLookup, itChecksum, parseVat } from "./core.js";
+import { viesCheck, ipaLookup } from "./core.js";
+import { addFreeRoutes } from "./free-app.js";
 import { logPayment } from "./payments.js";
-
-export const DESCRIPTIONS = {
-  vat: "Validate an EU VAT number (incl. Italian partita IVA) live against the European Commission VIES service. Use when an agent must confirm a supplier or customer is VAT-registered before invoicing, reverse-charge, onboarding or payment. Input: ?vat=IT00743110157 (country prefix optional, defaults to IT). Returns valid/invalid, registered name and address when the member state discloses them. Italian numbers are checksum-validated offline first.",
-  pa: "Look up an Italian public administration or public-service operator by 11-digit codice fiscale in IndicePA (AgID). Use when an agent must verify a public-sector counterparty, find its official PEC (certified email) addresses, or confirm it exists before e-invoicing. Input: ?cf=80016350821.",
-};
+import { DESCRIPTIONS, EURC, PA_DISCOVERY, acceptsFor } from "./constants.js";
+export { DESCRIPTIONS, EURC, PA_DISCOVERY, acceptsFor }; // moved to constants.js (no imports); re-exported for callers
 
 // Cache only plain data (never promises) across requests: Workers forbid awaiting I/O from another request.
 let supportedCache = null;
@@ -24,33 +23,8 @@ class CachedFacilitatorClient extends HTTPFacilitatorClient {
   }
 }
 
-const PA_EXAMPLE = { status: "found", isPublicAdministration: true, source: "IndicePA open data (AgID), CC BY 4.0",
-  entities: [{ codiceIPA: "c_g273", name: "Comune di Palermo", category: "Pubbliche Amministrazioni", ateco: "84.11.10", address: "Piazza Pretoria, 1 - Palazzo Delle Aquile 90133", website: "www.comune.palermo.it", pec: ["protocollo@cert.comune.palermo.it"] }] };
-
-// EURC (Circle, EIP-3009) per network. Addresses: https://developers.circle.com/stablecoins/eurc-contract-addresses
-// EIP-712 domain read on-chain (name()="EURC", version()="2", decimals()=6) on Base mainnet and Base Sepolia.
-export const EURC = {
-  "eip155:8453": "0x60a3E35Cc302bFA44Cb288Bc5a4F316Fdb1adb42",
-  "eip155:84532": "0x808456652fdb597867f38412077A9182bf77359F",
-};
-
-// Payment options for a price: USDC first (default), then the same nominal amount in EURC when the network has it.
-export function acceptsFor(price, network, payTo, env = {}) {
-  const usdc = { scheme: "exact", price, network, payTo };
-  const eurc = EURC[network];
-  if (!eurc || env.DISABLE_EURC === "1") return [usdc];
-  const amount = String(Math.round(parseFloat(String(price).replace(/[^0-9.]/g, "")) * 1e6));
-  return [usdc, { scheme: "exact", price: { amount, asset: eurc, extra: { name: "EURC", version: "2" } }, network, payTo }];
-}
-
 const netOf = env => env.X402_NETWORK || "eip155:8453"; // Base mainnet; testnet = eip155:84532
 const payToOf = env => env.PAY_TO || "0xde8380854ef9c926093832501d95a47f4c63fe7c"; // Yeison's Base wallet
-
-// Bazaar discovery declaration for GET /v1/pa (also used by the plain-data 402 in fast-paths.js).
-export const PA_DISCOVERY = { method: "GET",
-  input: { cf: "80016350821" },
-  inputSchema: { properties: { cf: { type: "string", pattern: "^[0-9]{11}$", description: "11-digit codice fiscale of the Italian public entity" } }, required: ["cf"] },
-  output: { example: PA_EXAMPLE } };
 
 export function buildX402(env = {}, log = null) {
   const network = netOf(env), payTo = payToOf(env);
@@ -77,21 +51,7 @@ export function createApp(env = {}, log = null) {
   const vatOn = env.ENABLE_VAT === "1"; // VIES off by default pending legal review
   const app = new Hono();
 
-  app.get("/", c => c.json({
-    name: "ItalyCheck", about: vatOn ? "Pay-per-call supplier verification for AI agents (EU VAT via VIES, Italian PA via IndicePA). Payment: x402, USDC or EURC on Base." : "Pay-per-call verification of Italian public administrations for AI agents (IndicePA). Payment: x402, USDC or EURC on Base.",
-    endpoints: [
-      { path: "/v1/pa", method: "GET", price: env.PRICE_PA || "$0.005", network, payment: "x402 exact, USDC or EURC (same nominal amount)", description: DESCRIPTIONS.pa },
-      { path: "/mcp", method: "POST", price: "per tool (x402 over MCP)", description: "Remote MCP server (Streamable HTTP, stateless). Tool lookup_italian_pa is paid via x402 MCP payments; check_partita_iva_format is free." },
-      { path: "/v1/vat/format", method: "GET", price: "free", description: "Offline Italian partita IVA format/checksum check, no external call." },
-      ...(vatOn ? [{ path: "/v1/vat", price: env.PRICE_VAT || "$0.01", description: DESCRIPTIONS.vat }] : []),
-    ],
-    license: { source: "IndicePA - Indice dei domicili digitali della Pubblica Amministrazione", publisher: "AgID - Agenzia per l'Italia Digitale", license: "CC BY 4.0", licenseUrl: "https://creativecommons.org/licenses/by/4.0/", sourceUrl: "https://indicepa.gov.it/ipa-dati/dataset/enti", notice: "Data © AgID - IndicePA, CC BY 4.0. Retrieved in real time; not modified except for field selection/renaming. ItalyCheck is not affiliated with or endorsed by AgID." },
-  }));
-
-  app.get("/v1/vat/format", c => {
-    const p = parseVat(c.req.query("vat"));
-    return c.json({ ...p, checksumOk: p.countryCode === "IT" ? itChecksum(p.vatNumber) : null });
-  });
+  addFreeRoutes(app, env); // GET /, GET /v1/vat/format (src/free-app.js)
 
   if (env.DISABLE_PAYMENTS !== "1") {
     // x402 server only for apps that charge (the free app never builds it: CPU on cold isolates).

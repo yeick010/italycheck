@@ -4,7 +4,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { viesCheck, ipaLookup } from "./core.js";
-import { DESCRIPTIONS } from "./app.js";
+import { DESCRIPTIONS } from "./constants.js";
 
 const BASE = process.env.ITALYCHECK_URL || "http://localhost:8787";
 const LOCAL = process.env.ITALYCHECK_LOCAL === "1";

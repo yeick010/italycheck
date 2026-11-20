@@ -83,6 +83,56 @@ await cmp("prompts/list (not supported)", { jsonrpc: "2.0", id: 3, method: "prom
   await cmp("tools/call validate_vat (falls back)", { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "validate_vat", arguments: { piva: "IT00743110157" } } }, undefined, {}, false);
   _resetMcpCache?.(); }
 
+// ── Lazy-import refactor (2026-11-20): plain-data copies of library values stay equal to the libraries ──
+{ const sdk = await import("@modelcontextprotocol/sdk/types.js");
+  const c = await import("../src/constants.js");
+  ok("MCP protocol versions == SDK", same(c.MCP_SUPPORTED_PROTOCOL_VERSIONS, sdk.SUPPORTED_PROTOCOL_VERSIONS) && c.MCP_LATEST_PROTOCOL_VERSION === sdk.LATEST_PROTOCOL_VERSION);
+  const bz = await import("@x402/extensions/bazaar");
+  const fp = await import("../src/fast-paths.js");
+  const decl = bz.declareDiscoveryExtension(c.PA_DISCOVERY);
+  const lib = { ...decl, bazaar: bz.bazaarResourceServerExtension.enrichDeclaration(decl.bazaar, { method: "GET", adapter: null, path: "/v1/pa" }) };
+  ok("Bazaar /v1/pa declaration == library (same keys order)", JSON.stringify(fp.paBazaarExtensions()) === JSON.stringify(lib));
+  const http = await import("@x402/core/http");
+  const sample = { x402Version: 2, error: "Payment required", resource: { url: "https://x.example/v1/pa?cf=1", description: "àèìòù € 日本 \u{1F600}" }, accepts: [], big: "x".repeat(70000) };
+  ok("payment-required header encoding == @x402/core/http (UTF-8, >32 KB)", fp.encodePaymentRequiredHeader(sample) === http.encodePaymentRequiredHeader(sample));
+  const app = await import("../src/app.js");
+  ok("app.js re-exports constants unchanged", app.DESCRIPTIONS === c.DESCRIPTIONS && app.EURC === c.EURC && app.PA_DISCOVERY === c.PA_DISCOVERY && app.acceptsFor === c.acceptsFor);
+  const fa = await import("../src/free-app.js");
+  let freeSame = true;
+  for (const e of [{ X402_NETWORK: "eip155:8453" }, { X402_NETWORK: "eip155:84532", ENABLE_VAT: "1", PRICE_PA: "$0.01" }])
+    for (const u of ["/", "/v1/vat/format?vat=IT00743110157", "/v1/vat/format", "/robots.txt", "/v1/pa?cf=80016350821"]) {
+      const a = await snap(await fa.createFreeApp(e).fetch(new Request("https://italycheck.example" + u), e));
+      const b = await snap(await app.createApp({ ...e, DISABLE_PAYMENTS: "1", FREE_ONLY: "1" }).fetch(new Request("https://italycheck.example" + u), e));
+      if (!same(a, b)) { freeSame = false; console.log("   differs:", u, JSON.stringify(a).slice(0, 200), JSON.stringify(b).slice(0, 200)); }
+    }
+  ok("createFreeApp == createApp(FREE_ONLY) for /, format, 404, /v1/pa", freeSame);
+  const rm = await import("../src/remote-mcp.js");
+  ok("remote-mcp.js and fast-paths.js share one unpaid MCP cache", rm.mcpUnpaid === fp.mcpUnpaid); }
+
+// ── Worker entry end to end (dynamic imports): fast routes, library routes, smoke-test shapes ──
+{ const worker = (await import("../src/worker.js")).default;
+  const env = { X402_NETWORK: "eip155:8453", PAY_TO: "0xde8380854ef9c926093832501d95a47f4c63fe7c", ENABLE_VAT: "0", PRICE_PA: "$0.005" };
+  const logs = []; const orig = console.log; console.log = (o, ...r) => typeof o === "object" ? logs.push(o) : orig(o, ...r);
+  try {
+    const root = await worker.fetch(new Request("https://italycheck.example/"), env, { waitUntil() {} });
+    const rj = await root.json();
+    ok("worker GET / -> 200 catalog via lazily imported app", root.status === 200 && rj.name === "ItalyCheck" && rj.endpoints[0].price === "$0.005");
+    const nf = await worker.fetch(new Request("https://italycheck.example/robots.txt"), env, {});
+    ok("worker unknown path -> 404", nf.status === 404);
+    unpaid402.clear();
+    const pa = await worker.fetch(new Request("https://italycheck.example/v1/pa?cf=80016350821"), env, {});
+    const pr = JSON.parse(atob(pa.headers.get("payment-required")));
+    ok("worker /v1/pa -> 402, 5000 USDC + EURC to PAY_TO, fast path", pa.status === 402 && logs.at(-1).fast_402 === true
+      && same(pr.accepts.map(a => [a.amount, a.asset, a.payTo]), [["5000", "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", env.PAY_TO], ["5000", "0x60a3E35Cc302bFA44Cb288Bc5a4F316Fdb1adb42", env.PAY_TO]]));
+    const init = await worker.fetch(req({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "1" } } }), env, {});
+    ok("worker /mcp initialize -> fast 200", init.status === 200 && (await init.json()).result.serverInfo.name === "italycheck" && logs.at(-1).mcp_fast === true);
+    const tl = await worker.fetch(req({ jsonrpc: "2.0", id: 2, method: "tools/list" }), env, {});
+    ok("worker /mcp tools/list -> fast, 2 tools", tl.status === 200 && (await tl.json()).result.tools.length === 2 && logs.at(-1).mcp_fast === true);
+    const pl = await worker.fetch(req({ jsonrpc: "2.0", id: 3, method: "prompts/list" }), env, {});
+    const plj = await pl.json();
+    ok("worker /mcp prompts/list -> SDK path (lazily imported), JSON-RPC error", !logs.at(-1).mcp_fast && plj.error?.code === -32601, JSON.stringify(plj).slice(0, 120));
+  } finally { console.log = orig; } }
+
 // ── Revenue state from on-chain logs (mock RPC) ──
 { const pad = a => "0x" + a.toLowerCase().slice(2).padStart(64, "0");
   const head = 1000, headTs = Date.parse("2026-10-30T09:00:00Z") / 1000;

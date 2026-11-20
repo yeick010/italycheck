@@ -4,18 +4,19 @@
 // unpaid tools/call use plain data cached at module scope (accepts array, payment-required result).
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
-import { createPaymentWrapper, extractPaymentFromMeta } from "@x402/mcp";
 import { z } from "zod";
-import { buildX402, acceptsFor, DESCRIPTIONS } from "./app.js";
+import { acceptsFor, DESCRIPTIONS } from "./constants.js";
 import { ipaLookup, itChecksum, parseVat } from "./core.js";
-import { PlainCache } from "./cache.js";
 import { readableMcpFailures } from "./payments.js";
-import { fastMcp, MCP_SERVER_INFO, TOOL_FORMAT, paToolDescription, PA_ARG_DESCRIPTION } from "./fast-paths.js";
+import { fastMcp, mcpUnpaid, MCP_SERVER_INFO, TOOL_FORMAT, paToolDescription, PA_ARG_DESCRIPTION } from "./fast-paths.js";
+export { mcpUnpaid };
+// This module (MCP SDK + zod) is itself loaded lazily by src/worker.js, only for requests the fast path declines.
+// @x402/mcp and the x402 server (app.js: Hono, @x402/*, @coinbase/x402) load only when lookup_italian_pa is called.
+const loadPaid = () => import("./mcp-paid.js");
 
 const out = o => ({ content: [{ type: "text", text: JSON.stringify(o) }] });
 const TTL = 3600_000;
 let acceptsCache = null; // { v, t, k }
-export const mcpUnpaid = new PlainCache(50, TTL); // resource URL -> payment-required tool result
 export const _resetMcpCache = () => { acceptsCache = null; mcpUnpaid.clear(); };
 
 async function getAccepts(env, network, payTo, server) {
@@ -47,6 +48,7 @@ export async function handleMcp(req, env, log = null, msg = undefined) {
     mcp.tool("lookup_italian_pa", paToolDescription(env),
       { cf: z.string().describe(PA_ARG_DESCRIPTION) },
       async (args, extra) => {
+        const { createPaymentWrapper, extractPaymentFromMeta, buildX402 } = await loadPaid();
         const unpaid = !extractPaymentFromMeta({ _meta: extra?._meta });
         if (unpaid) { const hit = mcpUnpaid.get(resource.url); if (hit) return structuredClone(hit); }
         const { network, payTo, server } = buildX402(env, log);
