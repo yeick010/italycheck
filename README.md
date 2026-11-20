@@ -8,6 +8,7 @@ Verifica fornitori pagata a chiamata dagli agenti AI. Solo fonti pubbliche gratu
 |---|---|---|
 | `GET /v1/vat?vat=IT00743110157` | $0.01 | EU VIES REST (passthrough in tempo reale, nessuna conservazione) |
 | `GET /v1/pa?cf=80016350821` | $0.005 USDC o €0.005 EURC | IndicePA, dataset "Enti" (AgID, CC BY 4.0, attribuzione obbligatoria) |
+| `GET /v1/counterparty?id=80016350821` | $0.01 USDC o €0.01 EURC | Verifica controparte: checksum + IndicePA "Enti" + "Unità Organizzative che ricevono fatture elettroniche" (AgID, CC BY 4.0). Solo dati PA. Input malformato, check digit errato o IndicePA giù: risposta 400/422/502, nessun addebito |
 | `GET /v1/vat/format?vat=...` | gratis | checksum P.IVA offline |
 | `GET /` | gratis | catalogo con descrizioni per agenti |
 
@@ -30,14 +31,14 @@ Verifica fornitori pagata a chiamata dagli agenti AI. Solo fonti pubbliche gratu
 
 ## Stato del deploy (16/10/2026)
 - Online: https://italycheck.italycheck.workers.dev (Cloudflare Workers Free, Base Sepolia testnet, facilitator x402.org)
-- Solo `/v1/pa` a pagamento. `/v1/vat` (VIES) disattivato: `ENABLE_VAT="0"`, in attesa di parere legale.
+- A pagamento: `/v1/pa` ($0.005) e `/v1/counterparty` ($0.01, `PRICE_COUNTERPARTY`, default nel codice). `/v1/vat` (VIES) disattivato: `ENABLE_VAT="0"`, in attesa di parere legale.
 - Deploy: `CLOUDFLARE_ACCOUNT_ID=... npx -y -p node@22 node ./node_modules/wrangler/bin/wrangler.js deploy` (wrangler 4 richiede Node 22).
 - Il Worker crea una nuova app per ogni richiesta e mette in cache solo la risposta "supported" del facilitator, come dati. Condividere promise in corso tra più richieste bloccava le richieste su Workers.
 
 ## Mainnet (16/10/2026, sera)
 - Rete Base mainnet `eip155:8453`, USDC `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`, facilitator CDP. I segreti `CDP_API_KEY_ID` e `CDP_API_KEY_SECRET` sono in Cloudflare (`wrangler secret`).
 - Bazaar: estensione discovery con schema e esempio. Validato da CDP `/x402/validate`: valid true.
-- MCP remoto: `POST /mcp` (Streamable HTTP, stateless). `lookup_italian_pa` si paga con x402 via MCP (`@x402/mcp`).
+- MCP remoto: `POST /mcp` (Streamable HTTP, stateless). `lookup_italian_pa` ($0.005) e `verify_italian_counterparty` ($0.01) si pagano con x402 via MCP (`@x402/mcp`); un risultato `isError` non viene addebitato.
 - CPU: `src/bazaar-shim.js` (alias wrangler) salta la rivalidazione ajv per ogni richiesta. JWT CDP e risposta "supported" sono in cache come dati.
 - Vedi SUBMISSIONS.md per la discovery.
 
