@@ -7,7 +7,7 @@ Verifica fornitori pagata a chiamata dagli agenti AI. Solo fonti pubbliche gratu
 | Path | Prezzo | Fonte |
 |---|---|---|
 | `GET /v1/vat?vat=IT00743110157` | $0.01 | EU VIES REST (passthrough in tempo reale, nessuna conservazione) |
-| `GET /v1/pa?cf=80016350821` | $0.005 USDC o €0.005 EURC | IndicePA, dataset "Enti" (AgID, CC BY 4.0, attribuzione obbligatoria). Addebito solo se l'ente è trovato (200): codice fiscale malformato 400, non trovato 404, IndicePA giù 502, nessun addebito |
+| `GET /v1/pa?cf=80016350821` | $0.005 USDC o €0.005 EURC | IndicePA, dataset "Enti" (AgID, CC BY 4.0, attribuzione obbligatoria). Addebito su ogni chiamata pagata (sempre 200): anche `not_found`, codice fiscale malformato e IndicePA irraggiungibile (`status: "error"`) |
 | `GET /v1/counterparty?id=80016350821` | $0.01 USDC o €0.01 EURC | Verifica controparte: checksum + IndicePA "Enti" + "Unità Organizzative che ricevono fatture elettroniche" (AgID, CC BY 4.0). Solo dati PA. Input malformato, check digit errato o IndicePA giù: risposta 400/422/502, nessun addebito |
 | `GET /v1/vat/format?vat=...` | gratis | checksum P.IVA offline |
 | `GET /` | gratis | catalogo con descrizioni per agenti |
@@ -57,8 +57,7 @@ Verifica fornitori pagata a chiamata dagli agenti AI. Solo fonti pubbliche gratu
 - HEAD resta 402 senza corpo, senza lookup e senza addebito. Prezzi, wallet, termini e `wrangler.toml` invariati.
 - Smoke: `SMOKE_GUIDE_INFO=1` (o `PRE_SMOKE_GUIDE_INFO=1` per lo script di deploy) per versioni precedenti.
 
-## /v1/pa: niente addebito se non trovato (24/11/2026)
-- Decisione di Yeison (24/11/2026 11:52): "la ricerca enti non deve addebitare se il codice fiscale è malformato o non trovato".
-- `GET /v1/pa`: 200 solo se l'ente è in IndicePA (addebitato). Codice fiscale malformato o mancante 400, non trovato 404 (`status: "not_found"`), IndicePA irraggiungibile 502: il middleware x402 non fa settle (nessun addebito). Stesso schema di `/v1/counterparty`.
-- MCP `lookup_italian_pa`: negli stessi casi il risultato è `isError`, quindi niente settle.
-- Prezzi (5000 / 10000), wallet, asset e `wrangler.toml` invariati. Smoke: `SMOKE_BILLING_INFO=1` (`PRE_SMOKE_BILLING_INFO=1` nello script di deploy) per versioni precedenti.
+## /v1/pa: addebito su ogni chiamata pagata (24/11/2026, 12:09)
+- Alle 11:52 Yeison aveva deciso di non addebitare cf malformati o non trovati (commit 7bb1b15, versione 1d83b0b1). Alle 12:09 ha corretto: "retifico, fali pagare, perche per noi comunque è un costo".
+- Ripristinato il comportamento precedente a 7bb1b15: `GET /v1/pa` risponde sempre 200 e il pagamento viene saldato per ente trovato, `not_found`, cf malformato o mancante e IndicePA irraggiungibile (`status: "error"`). MCP `lookup_italian_pa` non restituisce mai `isError`, quindi stesso addebito.
+- `/v1/counterparty` invariato (400/422/502 senza addebito). Prezzi, wallet, asset e `wrangler.toml` invariati. `serverInfo.version` MCP allineato a 0.2.2.

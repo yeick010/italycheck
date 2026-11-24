@@ -1,7 +1,9 @@
-// /v1/pa and MCP lookup_italian_pa: charged only when the entity is found (Yeison 24/11/2026 11:52: "la ricerca enti non deve
-// addebitare se il codice fiscale è malformato o non trovato"). Offline: IndicePA and the facilitator are mocked.
+// /v1/pa and MCP lookup_italian_pa: settled on EVERY paid call (found, not_found, malformed/missing cf, IndicePA unreachable),
+// the pre-7bb1b15 behavior restored by Yeison 24/11/2026 12:09 ("retifico, fali pagare, perche per noi comunque è un costo").
+// Offline: IndicePA and the facilitator are mocked.
 import { createApp } from "../src/app.js";
-import { paLookup, ipaLookup } from "../src/core.js";
+import { ipaLookup } from "../src/core.js";
+import { MCP_SERVER_INFO } from "../src/fast-paths.js";
 import { handleMcp, _resetMcpCache } from "../src/remote-mcp.js";
 import { paidRoute, unpaid402 } from "../src/worker.js";
 import { paToolDescription } from "../src/fast-paths.js";
@@ -36,27 +38,26 @@ globalThis.fetch = async (u, init) => {
   return realFetch(u, init);
 };
 
-// ── core: paLookup status mapping ──
-{ const f = await paLookup("80016350821"); ok("paLookup found -> 200", f.httpStatus === 200 && f.status === "found" && f.entities[0].name === "Comune di Palermo" && !("charged" in f));
-  const n = await paLookup("00743110157"); ok("paLookup not found -> 404 not charged", n.httpStatus === 404 && n.status === "not_found" && n.charged === false && /Not charged/.test(n.hint));
+// ── core: ipaLookup result per case (body only; billing does not depend on it) ──
+{ const f = await ipaLookup("80016350821"); ok("ipaLookup found", f.status === "found" && f.entities[0].name === "Comune di Palermo" && !("httpStatus" in f) && !("charged" in f));
+  const n = await ipaLookup("00743110157"); ok("ipaLookup not found -> status not_found", n.status === "not_found" && n.isPublicAdministration === false);
   calls.ipa = 0;
-  for (const bad of ["abc", "", undefined, "8001635082", "800163508211"]) { const b = await paLookup(bad);
-    ok(`paLookup malformed ${JSON.stringify(bad)} -> 400 not charged, no IndicePA call`, b.httpStatus === 400 && b.error === "expected_11_digit_codice_fiscale" && b.charged === false); }
+  for (const bad of ["abc", "", undefined, "8001635082", "800163508211"]) { const b = await ipaLookup(bad);
+    ok(`ipaLookup malformed ${JSON.stringify(bad)} -> status error expected_11_digit_codice_fiscale`, b.status === "error" && b.error === "expected_11_digit_codice_fiscale"); }
   ok("malformed cf: IndicePA never queried", calls.ipa === 0);
-  for (const m of ["down", "ckan_error", "html"]) { ipaMode = m; const r = await paLookup("80016350821"); ipaMode = "ok";
-    ok(`paLookup IndicePA ${m} -> 502 not charged`, r.httpStatus === 502 && r.error === "ipa_unreachable" && r.charged === false); }
-  const raw = await ipaLookup("80016350821"); ok("ipaLookup shape unchanged (no httpStatus)", raw.status === "found" && !("httpStatus" in raw)); }
+  for (const m of ["down", "ckan_error", "html"]) { ipaMode = m; const r = await ipaLookup("80016350821"); ipaMode = "ok";
+    ok(`ipaLookup IndicePA ${m} -> status error ipa_unreachable (not a false not_found)`, r.status === "error" && r.error === "ipa_unreachable"); } }
 
-// ── free app (no payments): HTTP statuses, no internal field ──
+// ── free app (no payments): /v1/pa always 200 (as before 7bb1b15) ──
 { const free = createApp({ DISABLE_PAYMENTS: "1" });
   const st = async p => { const r = await free.request(p); return [r.status, await r.json()]; };
-  let [s, j] = await st("/v1/pa?cf=80016350821"); ok("GET /v1/pa found -> 200, no httpStatus field", s === 200 && j.status === "found" && !("httpStatus" in j));
-  [s, j] = await st("/v1/pa?cf=00743110157"); ok("GET /v1/pa not found -> 404 JSON", s === 404 && j.status === "not_found" && j.charged === false);
-  [s, j] = await st("/v1/pa?cf=12"); ok("GET /v1/pa malformed -> 400 JSON", s === 400 && j.error === "expected_11_digit_codice_fiscale");
-  [s, j] = await st("/v1/pa"); ok("GET /v1/pa missing cf -> 400", s === 400);
-  ipaMode = "down"; [s, j] = await st("/v1/pa?cf=80016350821"); ipaMode = "ok"; ok("GET /v1/pa IndicePA down -> 502", s === 502 && j.error === "ipa_unreachable");
+  let [s, j] = await st("/v1/pa?cf=80016350821"); ok("GET /v1/pa found -> 200", s === 200 && j.status === "found");
+  [s, j] = await st("/v1/pa?cf=00743110157"); ok("GET /v1/pa not found -> 200 status not_found", s === 200 && j.status === "not_found" && !("charged" in j));
+  [s, j] = await st("/v1/pa?cf=12"); ok("GET /v1/pa malformed -> 200 status error", s === 200 && j.error === "expected_11_digit_codice_fiscale");
+  [s, j] = await st("/v1/pa"); ok("GET /v1/pa missing cf -> 200 status error", s === 200 && j.status === "error");
+  ipaMode = "down"; [s, j] = await st("/v1/pa?cf=80016350821"); ipaMode = "ok"; ok("GET /v1/pa IndicePA down -> 200 status error ipa_unreachable", s === 200 && j.error === "ipa_unreachable");
   const root = await (await free.request("/")).json(); const e = root.endpoints.find(x => x.path === "/v1/pa");
-  ok("catalog: /v1/pa still $0.005, states the charging rule", e.price === "$0.005" && /only on 200/.test(e.charged) && /404 not found/.test(e.charged)); }
+  ok("catalog: /v1/pa still $0.005, says every paid lookup is charged", e.price === "$0.005" && /every paid lookup/.test(e.charged) && /not_found/.test(e.charged) && !/not charged/i.test(e.charged)); }
 
 // ── paid HTTP flow with the mock facilitator: settle only when found ──
 const { x402Client } = await import("@x402/core/client");
@@ -71,16 +72,11 @@ const pay = async (cf, via = "app") => { const u = `https://italycheck.example/v
   const req = new Request(u, { headers: { "payment-signature": h, accept: "application/json" } });
   return via === "worker" ? paidRoute(req, env, {}) : createApp(env).fetch(req, env); };
 for (const via of ["app", "worker"]) {
-  calls.settle = 0; calls.verify = 0; let r = await pay("80016350821", via);
-  ok(`HTTP paid found (${via}) -> 200 + settled once + PAYMENT-RESPONSE`, r.status === 200 && (await r.json()).status === "found" && calls.settle === 1 && !!r.headers.get("payment-response"), `settle=${calls.settle}`);
-  calls.settle = 0; r = await pay("00743110157", via);
-  ok(`HTTP paid not found (${via}) -> 404, NOT settled, no PAYMENT-RESPONSE`, r.status === 404 && (await r.json()).status === "not_found" && calls.settle === 0 && !r.headers.get("payment-response"), `settle=${calls.settle}`);
-  calls.settle = 0; r = await pay("123", via);
-  ok(`HTTP paid malformed cf (${via}) -> 400, NOT settled`, r.status === 400 && calls.settle === 0, `settle=${calls.settle}`);
-  calls.settle = 0; r = await pay(null, via);
-  ok(`HTTP paid missing cf (${via}) -> 400, NOT settled`, r.status === 400 && calls.settle === 0, `settle=${calls.settle}`);
-  calls.settle = 0; ipaMode = "down"; r = await pay("80016350821", via); ipaMode = "ok";
-  ok(`HTTP paid IndicePA down (${via}) -> 502, NOT settled`, r.status === 502 && calls.settle === 0, `settle=${calls.settle}`);
+  for (const [name, cf, mode, status] of [["found", "80016350821", "ok", "found"], ["not found", "00743110157", "ok", "not_found"], ["malformed cf", "123", "ok", "error"],
+    ["missing cf", null, "ok", "error"], ["IndicePA down", "80016350821", "down", "error"]]) {
+    calls.settle = 0; ipaMode = mode; const r = await pay(cf, via); ipaMode = "ok";
+    ok(`HTTP paid ${name} (${via}) -> 200 status ${status} + settled once + PAYMENT-RESPONSE`, r.status === 200 && (await r.json()).status === status && calls.settle === 1 && !!r.headers.get("payment-response"), `status=${r.status} settle=${calls.settle}`);
+  }
 }
 
 // ── HEAD: still 402, empty body, no lookup, no verify/settle ──
@@ -98,19 +94,22 @@ for (const via of ["app", "worker"]) {
   ok("MCP unpaid -> payment-required 5000, isError", u.isError === true && u.structuredContent.accepts.every(a => a.amount === "5000"));
   const meta = { "x402/payment": await client.createPaymentPayload(u.structuredContent) };
   const call = async cf => (await (await handleMcp(rpc({ cf }, meta), env)).json()).result;
-  calls.settle = 0; let g = await call("80016350821");
-  ok("MCP paid found -> result + settled once", !g.isError && JSON.parse(g.content[0].text).status === "found" && g._meta?.["x402/payment-response"]?.success === true && calls.settle === 1, `settle=${calls.settle}`);
-  calls.settle = 0; g = await call("00743110157");
-  ok("MCP paid not found -> isError, NOT settled", g.isError === true && JSON.parse(g.content[0].text).status === "not_found" && calls.settle === 0, `settle=${calls.settle}`);
-  calls.settle = 0; g = await call("12x");
-  ok("MCP paid malformed cf -> isError, NOT settled", g.isError === true && JSON.parse(g.content[0].text).error === "expected_11_digit_codice_fiscale" && calls.settle === 0, `settle=${calls.settle}`);
-  calls.settle = 0; ipaMode = "down"; g = await call("80016350821"); ipaMode = "ok";
-  ok("MCP paid IndicePA down -> isError, NOT settled", g.isError === true && JSON.parse(g.content[0].text).error === "ipa_unreachable" && calls.settle === 0, `settle=${calls.settle}`);
-  ok("MCP result text has no internal httpStatus", !("httpStatus" in JSON.parse(g.content[0].text))); }
+  for (const [name, cf, mode, check] of [["found", "80016350821", "ok", t => t.status === "found"], ["not found", "00743110157", "ok", t => t.status === "not_found"],
+    ["malformed cf", "12x", "ok", t => t.error === "expected_11_digit_codice_fiscale"], ["IndicePA down", "80016350821", "down", t => t.error === "ipa_unreachable"]]) {
+    calls.settle = 0; ipaMode = mode; const g = await call(cf); ipaMode = "ok";
+    ok(`MCP paid ${name} -> result (not isError) + settled once`, !g.isError && check(JSON.parse(g.content[0].text)) && g._meta?.["x402/payment-response"]?.success === true && calls.settle === 1, `settle=${calls.settle}`);
+  }
+  const init = await (await handleMcp(new Request("https://italycheck.example/mcp", { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "1" } } }) }), env)).json();
+  ok("MCP initialize serverInfo.version = 0.2.2 (= server.json)", init.result.serverInfo.version === "0.2.2" && MCP_SERVER_INFO.version === JSON.parse((await import("node:fs")).readFileSync(new URL("../server.json", import.meta.url))).version); }
 
-// ── docs describe the new rule ──
-{ const d = paToolDescription({}); ok("tool description: price unchanged + not charged unless found", d.includes("Costs $0.005 in USDC") && /charged only when the entity is found/.test(d) && /not found/.test(d));
+// ── docs describe the restored rule (no claim of free errors on /v1/pa) ──
+{ const d = paToolDescription({}); ok("tool description: price unchanged + charged on every paid call", d.includes("Costs $0.005 in USDC") && /charged on every paid call/.test(d) && !/not charged:/.test(d));
   const docs = discoveryDocs({ pa: "$0.005", counterparty: "$0.01" });
   const o = JSON.parse(docs["/openapi.json"].body).paths["/v1/pa"].get;
-  ok("openapi /v1/pa: 400/404/502 not charged, price 0.005", o.responses[404] && /not charged/.test(o.responses[404].description) && o.responses[400] && o.responses[502] && o["x-payment-info"].price.amount === "0.005");
-  ok("llms.txt + .well-known/x402 state /v1/pa not charged on malformed/not found", /not charged on malformed cf, not found/.test(docs["/llms.txt"].body) && /not charged on 400\/404\/502/.test(JSON.parse(docs["/.well-known/x402"].body).instructions)); }
+  ok("openapi /v1/pa: no 400/404/502 not-charged responses, price 0.005", !o.responses[400] && !o.responses[404] && !o.responses[502] && o["x-payment-info"].price.amount === "0.005" && /not_found/.test(o.responses[200].description));
+  const x = JSON.parse(docs["/.well-known/x402"].body).instructions, l = docs["/llms.txt"].body;
+  const paLine = t => t.split("\n").find(z => z.includes("/v1/pa?cf="));
+  ok("llms.txt + .well-known/x402: /v1/pa charged also on not_found/malformed, no 'not charged' claim", /charged on every paid lookup/.test(paLine(x)) && /charged on every paid lookup/.test(paLine(l)) && !/not charged/i.test(paLine(x) + paLine(l)));
+  const cp = JSON.parse(docs["/openapi.json"].body).paths["/v1/counterparty"].get;
+  ok("counterparty docs unchanged: 400/422/502 not charged", /not charged/.test(cp.responses[422].description) && /not charged on 400\/422\/502/.test(x)); }

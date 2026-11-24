@@ -17,7 +17,8 @@ const okHead = (name, cond, extra = "") => process.env.SMOKE_HEAD_INFO === "1" &
 // the 24/11/2026 conversion change, i.e. the deploy preflight and the post-rollback check on 02b91488).
 const okGuide = (name, cond, extra = "") => process.env.SMOKE_GUIDE_INFO === "1" && !cond
   ? console.log(`INFO  ${name}${extra ? "  " + extra : ""}  (not counted: SMOKE_GUIDE_INFO=1)`) : ok(name, cond, extra);
-// SMOKE_BILLING_INFO=1: checks for the /v1/pa no-charge rule texts (24/11/2026) reported but not counted (older versions).
+// SMOKE_BILLING_INFO=1: checks for the /v1/pa charging texts and MCP serverInfo.version 0.2.2 (24/11/2026 12:09 revert)
+// reported but not counted (versions before it, e.g. rollback target 1d83b0b1).
 const okBilling = (name, cond, extra = "") => process.env.SMOKE_BILLING_INFO === "1" && !cond
   ? console.log(`INFO  ${name}${extra ? "  " + extra : ""}  (not counted: SMOKE_BILLING_INFO=1)`) : ok(name, cond, extra);
 const mcp = (body) => fetch(BASE + "/mcp", { method: "POST", headers: { ...UA, "content-type": "application/json",
@@ -37,7 +38,7 @@ async function paid402(path, amount) {
     JSON.stringify(same) === JSON.stringify(pr) && typeof message === "string" && message.includes("PAYMENT-SIGNATURE")
     && howToPay?.price?.atomicAmount === amount && howToPay?.price?.payTo === PAY_TO && (howToPay?.docs || []).includes("https://github.com/yeick010/italycheck"),
     `bodyKeys=${Object.keys(bj).join(",")}`);
-  if (path.startsWith("/v1/pa")) okBilling(`GET ${path} -> 402 message: not charged on 400/404/502`, /404 \(not found/.test(message || ""), "");
+  if (path.startsWith("/v1/pa")) okBilling(`GET ${path} -> 402 message: charged on every paid lookup`, /Charged on every paid lookup/.test(message || "") && !/Not charged/.test(message || ""), "");
   const po = await fetch(BASE + path, { method: "POST", headers: UA });
   okGuide(`POST ${path.split("?")[0]} -> 405 Allow: GET, HEAD`, po.status === 405 && po.headers.get("allow") === "GET, HEAD", `status=${po.status}`);
   const h = await fetch(BASE + path, { method: "HEAD", headers: { ...UA, accept: "application/json" } });
@@ -52,10 +53,11 @@ try {
   const rj = await root.json().catch(() => ({}));
   ok("GET / -> 200 catalog", root.status === 200 && rj.name === "ItalyCheck" && Array.isArray(rj.endpoints), `status=${root.status}`);
   const pe = (rj.endpoints || []).find(e => e.path === "/v1/pa") || {};
-  okBilling("GET / -> /v1/pa charged only on 200 (not on 400/404/502)", /only on 200/.test(pe.charged || "") && /404 not found/.test(pe.charged || ""), `charged=${pe.charged}`);
+  okBilling("GET / -> /v1/pa charged on every paid lookup (also not_found)", /every paid lookup/.test(pe.charged || "") && /not_found/.test(pe.charged || ""), `charged=${pe.charged}`);
   const init = await mcp({ method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "smoke", version: "1" } } });
   const ij = await init.json().catch(() => ({}));
   ok("POST /mcp initialize -> 200 serverInfo italycheck", init.status === 200 && ij.result?.serverInfo?.name === "italycheck", `status=${init.status}`);
+  okBilling("POST /mcp initialize -> serverInfo.version 0.2.2", ij.result?.serverInfo?.version === "0.2.2", `version=${ij.result?.serverInfo?.version}`);
   const tl = await mcp({ method: "tools/list", params: {} });
   const names = ((await tl.json().catch(() => ({}))).result?.tools || []).map(t => t.name);
   ok("POST /mcp tools/list -> lookup_italian_pa, verify_italian_counterparty, check_partita_iva_format",

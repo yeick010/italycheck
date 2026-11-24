@@ -7,11 +7,11 @@ import { decodePaymentRequiredHeader } from "@x402/core/http";
 const BASE_DOCS = "https://github.com/yeick010/italycheck";
 const SITE = "https://italycheck.italycheck.workers.dev";
 
-// Per-route facts that the header does not carry. Charging rules must match the code: /v1/pa answers 400/404/502 (not charged)
-// on malformed cf, not found or IndicePA failure (since 24/11/2026); /v1/counterparty answers 400/422/502 (not charged) likewise.
+// Per-route facts that the header does not carry. Charging rules must match the code: /v1/pa answers 200 (charged) for every
+// paid lookup incl. not_found, malformed cf and IndicePA unreachable; /v1/counterparty answers 400/422/502 (not charged) on bad input or IndicePA failure.
 export const ROUTE_INFO = {
   "/v1/pa": { query: "cf", example: "80016350821", input: "cf = 11-digit codice fiscale of the Italian public entity",
-    charging: "Not charged when the answer is 400 (malformed cf), 404 (not found in IndicePA) or 502 (IndicePA unreachable): payment is settled only on 200 (entity found).",
+    charging: "Charged on every paid lookup (always 200): found, status not_found (not a public administration), and status error (malformed cf or IndicePA unreachable). Validate the 11 digits first (free: GET /v1/vat/format?vat=...).",
     alsoSee: "/v1/counterparty?id=... (counterparty verdict incl. SDI e-invoicing offices; not charged on bad input or IndicePA outage)" },
   "/v1/counterparty": { query: "id", example: "80016350821", input: "id = Italian partita IVA or numeric codice fiscale (11 digits, optional IT prefix)",
     charging: "Not charged when the answer is 400 (malformed input), 422 (wrong check digit) or 502 (IndicePA unreachable): payment is settled only on 200.",
@@ -86,23 +86,23 @@ export function discoveryDocs(prices) {
   const resources = [`${SITE}/v1/pa?cf=80016350821`, `${SITE}/v1/counterparty?id=80016350821`];
   const x402 = { version: 1, resources,
     instructions: `# ItalyCheck\nItalian public-administration checks for AI agents (IndicePA, AgID, CC BY 4.0). x402 v2, USDC or EURC on Base (eip155:8453).\n` +
-      `- GET /v1/pa?cf=<11 digits>: ${prices.pa} per call. IndicePA record (name, category, PEC, address); not charged on 400/404/502 (malformed cf, not found, IndicePA outage).\n` +
+      `- GET /v1/pa?cf=<11 digits>: ${prices.pa} per call. IndicePA record (name, category, PEC, address); charged on every paid lookup, also not_found or malformed cf.\n` +
       `- GET /v1/counterparty?id=<partita IVA or codice fiscale>: ${prices.counterparty} per call. Verdict pa_verificata | formato_valido_non_verificato | formato_non_valido + SDI e-invoicing offices; not charged on 400/422/502.\n` +
       `- Free: GET /v1/vat/format?vat=<partita IVA> (offline check digit). MCP: POST /mcp (Streamable HTTP).\nDocs: ${BASE_DOCS}` };
   const op = (summary, q, desc, price, pattern, notCharged) => ({ get: { summary, operationId: summary.replace(/\W+/g, "_").toLowerCase(),
     parameters: [{ name: q, in: "query", required: true, description: desc, schema: { type: "string", pattern } }],
     "x-payment-info": { protocols: ["x402"], price: { mode: "fixed", currency: "USD", amount: usd(price) }, network: "eip155:8453", assets: ["USDC", "EURC"] },
-    responses: { 200: { description: "Result (JSON), charged" }, ...notCharged, 402: { description: "Payment required (x402 v2: PAYMENT-REQUIRED header; retry with PAYMENT-SIGNATURE)" } } } });
+    responses: { 200: { description: "Result (JSON), charged (for /v1/pa also status not_found / error)" }, ...notCharged, 402: { description: "Payment required (x402 v2: PAYMENT-REQUIRED header; retry with PAYMENT-SIGNATURE)" } } } });
   const openapi = { openapi: "3.1.0",
     info: { title: "ItalyCheck", version: "0.2.2", description: "Pay-per-call verification of Italian public administrations for AI agents (IndicePA). Payment: x402 v2, USDC or EURC on Base.", "x-docs": BASE_DOCS },
     servers: [{ url: SITE }],
     paths: {
-      "/v1/pa": op("Look up Italian public administration", "cf", "11-digit codice fiscale", prices.pa, "^[0-9]{11}$", { 400: { description: "Malformed cf, not charged" }, 404: { description: "Not found in IndicePA, not charged" }, 502: { description: "IndicePA unreachable, not charged" } }),
+      "/v1/pa": op("Look up Italian public administration", "cf", "11-digit codice fiscale", prices.pa, "^[0-9]{11}$", {}),
       "/v1/counterparty": op("Verify Italian counterparty", "id", "Italian partita IVA or numeric codice fiscale (11 digits, optional IT prefix)", prices.counterparty, "^(IT)?[0-9]{11}$", { 400: { description: "Malformed input, not charged" }, 422: { description: "Wrong check digit, not charged" }, 502: { description: "IndicePA unreachable, not charged" } }),
       "/v1/vat/format": { get: { summary: "Free offline partita IVA check digit", operationId: "vat_format", parameters: [{ name: "vat", in: "query", required: true, schema: { type: "string" } }], responses: { 200: { description: "Format result" } } } },
     } };
   const llms = `# ItalyCheck\n\n> Italian public-administration and counterparty checks for AI agents. Data: IndicePA (AgID), CC BY 4.0. Payment: x402 v2, USDC or EURC on Base (eip155:8453), no account or API key.\n\n` +
-    `## Paid endpoints\n- [GET /v1/pa?cf=80016350821](${SITE}/v1/pa?cf=80016350821): ${prices.pa} per call. IndicePA record of a public administration (name, category, PEC, address); not charged on malformed cf, not found or IndicePA outage.\n` +
+    `## Paid endpoints\n- [GET /v1/pa?cf=80016350821](${SITE}/v1/pa?cf=80016350821): ${prices.pa} per call. IndicePA record of a public administration (name, category, PEC, address); charged on every paid lookup, also not_found, malformed cf or IndicePA unavailable.\n` +
     `- [GET /v1/counterparty?id=80016350821](${SITE}/v1/counterparty?id=80016350821): ${prices.counterparty} per call. Verdict + SDI e-invoicing offices; not charged on bad input or IndicePA outage.\n\n` +
     `## How to pay\nUnpaid GET -> 402 with PAYMENT-REQUIRED header (base64 JSON, also in the body). Sign one entry of accepts with an x402 v2 client (e.g. @x402/fetch + @x402/evm) and repeat the GET with PAYMENT-SIGNATURE.\n\n` +
     `## Free\n- [GET /v1/vat/format?vat=00743110157](${SITE}/v1/vat/format?vat=00743110157): offline check digit.\n- MCP (Streamable HTTP): ${SITE}/mcp\n\n## Docs\n- ${BASE_DOCS}\n- ${SITE}/openapi.json\n`;

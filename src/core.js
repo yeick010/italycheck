@@ -66,16 +66,9 @@ export async function ipaLookup(cf, { fetchImpl = fetch } = {}) {
   return { ...base, status: "found", isPublicAdministration: true, entities: recs.map(enteOf) };
 }
 
-// Paid /v1/pa and MCP lookup_italian_pa (Yeison 24/11/2026 11:52: "la ricerca enti non deve addebitare se il codice fiscale
-// è malformato o non trovato"): httpStatus 200 = found (billable); 400 malformed cf, 404 not found, 502 IndicePA unreachable
-// = not billable (x402 cancels settlement on >= 400 and on MCP isError results), same pattern as counterpartyCheck.
-export async function paLookup(cf, opts) {
-  const r = await ipaLookup(cf, opts);
-  if (r.status === "found") return { ...r, httpStatus: 200 };
-  if (r.status === "not_found") return { ...r, httpStatus: 404, charged: false, hint: "Not charged." };
-  if (r.error === "ipa_unreachable") return { ...r, httpStatus: 502, charged: false, hint: "IndicePA did not answer; retry later. Not charged." };
-  return { ...r, httpStatus: 400, charged: false, hint: "Pass the 11-digit codice fiscale of the entity, e.g. ?cf=80016350821. Not charged." };
-}
+// Paid /v1/pa and MCP lookup_italian_pa answer 200 for every ipaLookup result (found, not_found, status "error" for a
+// malformed cf or IndicePA unreachable), so every paid lookup is settled. Yeison 24/11/2026 12:09 ("fali pagare, perché per noi
+// comunque è un costo") reverted the 11:52 no-charge rule (commit 7bb1b15) back to this pre-7bb1b15 behavior.
 
 // ── Verifica controparte (design/verifica-controparte.md) ──
 // One call: offline checksum + IndicePA "Enti" + IndicePA "Unità organizzative che ricevono fatture elettroniche"
