@@ -8,7 +8,7 @@ import { createPaymentWrapper, extractPaymentFromMeta } from "@x402/mcp";
 import { z } from "zod";
 import { CallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
 import { buildX402, acceptsFor, DESCRIPTIONS, priceCounterparty } from "./app.js";
-import { ipaLookup, itChecksum, parseVat, counterpartyCheck } from "./core.js";
+import { paLookup, itChecksum, parseVat, counterpartyCheck } from "./core.js";
 import { PlainCache } from "./cache.js";
 import { readableMcpFailures } from "./payments.js";
 import { fastMcp, MCP_SERVER_INFO, TOOL_FORMAT, paToolDescription, PA_ARG_DESCRIPTION,
@@ -64,7 +64,8 @@ export async function handleMcp(req, env, log = null, msg = undefined) {
   if (req.method === "POST") {
     paidTool(mcp, req, env, log, { name: "lookup_italian_pa", description: paToolDescription(env), price: env.PRICE_PA || "$0.005",
       argName: "cf", argDescription: PA_ARG_DESCRIPTION, resourceDescription: DESCRIPTIONS.pa.replace(" Input: ?cf=80016350821.", ""),
-      tags: ["italy", "public-administration", "pec", "kyb", "e-invoicing"], handler: async ({ cf }) => out(await ipaLookup(cf)) });
+      tags: ["italy", "public-administration", "pec", "kyb", "e-invoicing"], handler: async ({ cf }) => { const { httpStatus, ...r } = await paLookup(cf); return httpStatus === 200 ? out(r) : { ...out(r), isError: true }; } });
+    // isError (malformed cf, not found, IndicePA down) -> not charged, same as verify_italian_counterparty.
     // isError (bad input, wrong check digit, IndicePA down) -> @x402/mcp cancels settlement: not charged.
     paidTool(mcp, req, env, log, { name: COUNTERPARTY_TOOL, description: counterpartyToolDescription(env), price: priceCounterparty(env),
       argName: "id", argDescription: COUNTERPARTY_ARG_DESCRIPTION, resourceDescription: DESCRIPTIONS.counterparty.replace(" Input: ?id=80016350821.", ""),

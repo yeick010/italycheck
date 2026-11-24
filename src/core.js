@@ -61,8 +61,20 @@ export async function ipaLookup(cf, { fetchImpl = fetch } = {}) {
   let j;
   try { j = await ipaGet(ipaQuery(IPA_ENTI, { Codice_fiscale_ente: code }), fetchImpl); } catch { return { ...base, status: "error", error: "ipa_unreachable" }; }
   const recs = j?.result?.records || [];
+  if (j?.success === false || !Array.isArray(j?.result?.records)) return { ...base, status: "error", error: "ipa_unreachable" }; // CKAN error answer
   if (!recs.length) return { ...base, status: "not_found", isPublicAdministration: false, note: "Not in IndicePA (not a PA / public service operator, or not registered)." };
   return { ...base, status: "found", isPublicAdministration: true, entities: recs.map(enteOf) };
+}
+
+// Paid /v1/pa and MCP lookup_italian_pa (Yeison 24/11/2026 11:52: "la ricerca enti non deve addebitare se il codice fiscale
+// è malformato o non trovato"): httpStatus 200 = found (billable); 400 malformed cf, 404 not found, 502 IndicePA unreachable
+// = not billable (x402 cancels settlement on >= 400 and on MCP isError results), same pattern as counterpartyCheck.
+export async function paLookup(cf, opts) {
+  const r = await ipaLookup(cf, opts);
+  if (r.status === "found") return { ...r, httpStatus: 200 };
+  if (r.status === "not_found") return { ...r, httpStatus: 404, charged: false, hint: "Not charged." };
+  if (r.error === "ipa_unreachable") return { ...r, httpStatus: 502, charged: false, hint: "IndicePA did not answer; retry later. Not charged." };
+  return { ...r, httpStatus: 400, charged: false, hint: "Pass the 11-digit codice fiscale of the entity, e.g. ?cf=80016350821. Not charged." };
 }
 
 // ── Verifica controparte (design/verifica-controparte.md) ──

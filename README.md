@@ -7,7 +7,7 @@ Verifica fornitori pagata a chiamata dagli agenti AI. Solo fonti pubbliche gratu
 | Path | Prezzo | Fonte |
 |---|---|---|
 | `GET /v1/vat?vat=IT00743110157` | $0.01 | EU VIES REST (passthrough in tempo reale, nessuna conservazione) |
-| `GET /v1/pa?cf=80016350821` | $0.005 USDC o €0.005 EURC | IndicePA, dataset "Enti" (AgID, CC BY 4.0, attribuzione obbligatoria) |
+| `GET /v1/pa?cf=80016350821` | $0.005 USDC o €0.005 EURC | IndicePA, dataset "Enti" (AgID, CC BY 4.0, attribuzione obbligatoria). Addebito solo se l'ente è trovato (200): codice fiscale malformato 400, non trovato 404, IndicePA giù 502, nessun addebito |
 | `GET /v1/counterparty?id=80016350821` | $0.01 USDC o €0.01 EURC | Verifica controparte: checksum + IndicePA "Enti" + "Unità Organizzative che ricevono fatture elettroniche" (AgID, CC BY 4.0). Solo dati PA. Input malformato, check digit errato o IndicePA giù: risposta 400/422/502, nessun addebito |
 | `GET /v1/vat/format?vat=...` | gratis | checksum P.IVA offline |
 | `GET /` | gratis | catalogo con descrizioni per agenti |
@@ -56,3 +56,9 @@ Verifica fornitori pagata a chiamata dagli agenti AI. Solo fonti pubbliche gratu
 - Nuovi documenti gratuiti: `/.well-known/x402` (formato x402scan, senza ownershipProofs), `/openapi.json` (con `x-payment-info`), `/llms.txt`.
 - HEAD resta 402 senza corpo, senza lookup e senza addebito. Prezzi, wallet, termini e `wrangler.toml` invariati.
 - Smoke: `SMOKE_GUIDE_INFO=1` (o `PRE_SMOKE_GUIDE_INFO=1` per lo script di deploy) per versioni precedenti.
+
+## /v1/pa: niente addebito se non trovato (24/11/2026)
+- Decisione di Yeison (24/11/2026 11:52): "la ricerca enti non deve addebitare se il codice fiscale è malformato o non trovato".
+- `GET /v1/pa`: 200 solo se l'ente è in IndicePA (addebitato). Codice fiscale malformato o mancante 400, non trovato 404 (`status: "not_found"`), IndicePA irraggiungibile 502: il middleware x402 non fa settle (nessun addebito). Stesso schema di `/v1/counterparty`.
+- MCP `lookup_italian_pa`: negli stessi casi il risultato è `isError`, quindi niente settle.
+- Prezzi (5000 / 10000), wallet, asset e `wrangler.toml` invariati. Smoke: `SMOKE_BILLING_INFO=1` (`PRE_SMOKE_BILLING_INFO=1` nello script di deploy) per versioni precedenti.

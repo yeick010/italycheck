@@ -4,7 +4,7 @@ import { ExactEvmScheme } from "@x402/evm/exact/server";
 import { HTTPFacilitatorClient } from "@x402/core/server";
 import { createFacilitatorConfig } from "@coinbase/x402";
 import { declareDiscoveryExtension, bazaarResourceServerExtension } from "@x402/extensions/bazaar";
-import { viesCheck, ipaLookup, itChecksum, parseVat, counterpartyCheck } from "./core.js";
+import { viesCheck, paLookup, itChecksum, parseVat, counterpartyCheck } from "./core.js";
 import { logPayment } from "./payments.js";
 
 export const DESCRIPTIONS = {
@@ -94,8 +94,8 @@ export function createApp(env = {}, log = null) {
   app.get("/", c => c.json({
     name: "ItalyCheck", about: vatOn ? "Pay-per-call supplier verification for AI agents (EU VAT via VIES, Italian PA via IndicePA). Payment: x402, USDC or EURC on Base." : "Pay-per-call verification of Italian public administrations for AI agents (IndicePA). Payment: x402, USDC or EURC on Base.",
     endpoints: [
-      { path: "/v1/pa", method: "GET", price: env.PRICE_PA || "$0.005", network, payment: "x402 exact, USDC or EURC (same nominal amount)", description: DESCRIPTIONS.pa },
-      { path: "/v1/counterparty", method: "GET", price: priceCounterparty(env), network, payment: "x402 exact, USDC or EURC (same nominal amount)", description: DESCRIPTIONS.counterparty },
+      { path: "/v1/pa", method: "GET", price: env.PRICE_PA || "$0.005", network, payment: "x402 exact, USDC or EURC (same nominal amount)", charged: "only on 200 (found); not on 400 malformed cf, 404 not found, 502 IndicePA unreachable", description: DESCRIPTIONS.pa },
+      { path: "/v1/counterparty", method: "GET", price: priceCounterparty(env), network, payment: "x402 exact, USDC or EURC (same nominal amount)", charged: "only on 200; not on 400 malformed input, 422 wrong check digit, 502 IndicePA unreachable", description: DESCRIPTIONS.counterparty },
       { path: "/mcp", method: "POST", price: "per tool (x402 over MCP)", description: "Remote MCP server (Streamable HTTP, stateless). Tools lookup_italian_pa and verify_italian_counterparty are paid via x402 MCP payments; check_partita_iva_format is free." },
       { path: "/v1/vat/format", method: "GET", price: "free", description: "Offline Italian partita IVA format/checksum check, no external call." },
       ...(vatOn ? [{ path: "/v1/vat", price: env.PRICE_VAT || "$0.01", description: DESCRIPTIONS.vat }] : []),
@@ -123,7 +123,8 @@ export function createApp(env = {}, log = null) {
 
   if (env.FREE_ONLY === "1") return app; // safety: free app never serves paid routes
   if (vatOn) app.get("/v1/vat", async c => c.json(await viesCheck(c.req.query("vat"))));
-  app.get("/v1/pa", async c => c.json(await ipaLookup(c.req.query("cf"))));
+  // Not found / malformed cf / IndicePA down -> 404/400/502: the x402 middleware does not settle (not charged).
+  app.get("/v1/pa", async c => { const { httpStatus, ...body } = await paLookup(c.req.query("cf")); return c.json(body, httpStatus); });
   // Non-200 (bad input, wrong check digit, IndicePA down) -> the x402 middleware does not settle: not charged.
   app.get("/v1/counterparty", async c => { const { httpStatus, ...body } = await counterpartyCheck(c.req.query("id")); return c.json(body, httpStatus); });
   return app;

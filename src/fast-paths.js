@@ -70,7 +70,7 @@ export const TOOL_FORMAT = { name: "check_partita_iva_format",
 // How to pay, appended to both paid tool descriptions (seen by MCP clients and directories in tools/list).
 const PAY_HINT = ' Unpaid calls return the x402 v2 payment requirements (isError, not charged); pay per call with an x402 MCP client (payment in params._meta["x402/payment"], e.g. @x402/mcp). Docs: https://github.com/yeick010/italycheck';
 export const paToolDescription = env => DESCRIPTIONS.pa.replace(" Input: ?cf=80016350821.", "") +
-  ` Costs ${env.PRICE_PA || "$0.005"} in USDC (or ${(env.PRICE_PA || "$0.005").replace("$", "")} EURC) on Base via x402.` + PAY_HINT;
+  ` Costs ${env.PRICE_PA || "$0.005"} in USDC (or ${(env.PRICE_PA || "$0.005").replace("$", "")} EURC) on Base via x402, charged only when the entity is found: a malformed codice fiscale, not found or an IndicePA outage are not charged.` + PAY_HINT;
 export const PA_ARG_DESCRIPTION = "11-digit codice fiscale, e.g. 80016350821";
 export const COUNTERPARTY_TOOL = "verify_italian_counterparty";
 export const counterpartyToolDescription = env => DESCRIPTIONS.counterparty.replace(" Input: ?id=80016350821.", "") +

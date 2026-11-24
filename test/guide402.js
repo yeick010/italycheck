@@ -39,7 +39,7 @@ for (const [path, q, amount, usd] of [["/v1/pa", "cf", "5000", "0.005"], ["/v1/c
   ok(`GET ${path}: howToPay price/payTo from the header, example, client, docs`, howToPay.price.atomicAmount === amount && howToPay.price.amount === usd && howToPay.price.payTo === PAYTO
     && JSON.stringify(howToPay.price.currency) === '["USDC","EURC"]' && howToPay.example === `GET https://italycheck.italycheck.workers.dev${path}?${q}=80016350821`
     && howToPay.client.code.includes("wrapFetchWithPaymentFromConfig") && howToPay.docs.includes("https://github.com/yeick010/italycheck") && howToPay.docs.includes("https://italycheck.italycheck.workers.dev/"));
-  ok(`GET ${path}: charging rule matches the code`, path === "/v1/pa" ? message.includes("Charged on every 200") : message.includes("Not charged when the answer is 400") && message.includes("502"));
+  ok(`GET ${path}: charging rule matches the code`, path === "/v1/pa" ? message.includes("Not charged when the answer is 400 (malformed cf), 404 (not found") && message.includes("502") : message.includes("Not charged when the answer is 400") && message.includes("502"));
   ok(`GET ${path}: body size reasonable (< 8 KB)`, gB.length < 8192, `bytes=${gB.length}`);
   const hit = await quiet(() => worker.fetch(new Request(U, { headers: { accept: "application/json" } }), MAIN, {}));
   ok(`GET ${path}: cache hit returns the same bytes`, (await hit.text()) === gB && unpaid402.size === 1);
