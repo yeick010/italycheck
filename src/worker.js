@@ -5,7 +5,8 @@
 // Unpaid requests to paid routes (no PAYMENT-SIGNATURE / X-PAYMENT header) get a cached 402 (plain data:
 // status, headers, body text) keyed by full URL; built once per URL via the normal middleware path.
 // Free routes (catalog, format check) use one app per isolate WITHOUT payment middleware: no shared I/O.
-import { createApp } from "./app.js";
+import { createApp, priceCounterparty } from "./app.js";
+import { withGuide, methodNotAllowed, discoveryDocs, ROUTE_INFO } from "./guide402.js";
 import { handleMcp } from "./remote-mcp.js";
 import { PlainCache } from "./cache.js";
 import { fastUnpaid402, NO_BODY, BAD_JSON } from "./fast-paths.js";
@@ -24,11 +25,15 @@ const notFound = () => new Response("404 Not Found", { status: 404, headers: { "
 // HEAD to a paid route (approved by Yeison 20/11/2026 22:24): always the unpaid JSON GET 402 (same status and headers,
 // incl. PAYMENT-REQUIRED), no body. Never runs the lookup or a settlement, even with a payment header (HEAD carries no data).
 // Before this, HEAD fell through to the app: 200 without payment and a full IndicePA lookup.
+// Plain-data unpaid JSON 402 with the readable body (guide402.js), or null for the library path.
+const fastGuided = (url, path, env) => { const f = fastUnpaid402(url, env); return f && withGuide(f, path); };
+const routeKey = path => path.replace(/\/$/, "");
+
 async function headPaid(req, env, ctx, log) {
   if (log) log.head_402 = true;
   const key = "j " + req.url;
   let e = unpaid402.get(key);
-  if (!e) { e = fastUnpaid402(req.url, env); if (e) { if (log) log.fast_402 = true; unpaid402.set(key, e); } }
+  if (!e) { e = fastGuided(req.url, routeKey(new URL(req.url).pathname), env); if (e) { if (log) log.fast_402 = true; unpaid402.set(key, e); } }
   if (!e) { // library path (non-default configs): the GET it stands for, without payment headers, body dropped
     const h = new Headers(req.headers); h.delete("payment-signature"); h.delete("x-payment"); h.set("accept", "application/json");
     const res = await createApp(env).fetch(new Request(req.url, { method: "GET", headers: h }), env, ctx);
@@ -38,20 +43,43 @@ async function headPaid(req, env, ctx, log) {
 }
 
 export async function paidRoute(req, env, ctx, log = null) {
-  if (req.method !== "GET" && req.method !== "HEAD" && !hasPayment(req)) { if (log) log.fast_404 = true; return notFound(); }
+  const path = routeKey(new URL(req.url).pathname);
+  if (req.method !== "GET" && req.method !== "HEAD" && !hasPayment(req)) {
+    if (!Object.hasOwn(ROUTE_INFO, path)) { if (log) log.fast_404 = true; return notFound(); }
+    if (log) log.fast_405 = true;
+    return methodNotAllowed(path, req.method);
+  }
   if (req.method === "HEAD") return headPaid(req, env, ctx, log);
-  if (hasPayment(req)) return createApp(env, log).fetch(req, env, ctx);
+  if (hasPayment(req)) {
+    const res = await createApp(env, log).fetch(req, env, ctx);
+    if (res.status !== 402 || isBrowser(req)) return res;
+    // Failed or unreadable payment: same 402 status and headers, readable body (v1 X-PAYMENT gets a header hint).
+    const e = withGuide({ status: 402, headers: [...res.headers], body: await res.text() }, path,
+      { legacyHeader: req.headers.has("x-payment") && !req.headers.has("payment-signature") });
+    if (log && e.body !== "{}") log.guide_402 = true;
+    return toResponse(e);
+  }
   const browser = isBrowser(req);
   const key = (browser ? "h " : "j ") + req.url;
   const hit = unpaid402.get(key);
   if (hit) return toResponse(hit);
-  const fast = browser ? null : fastUnpaid402(req.url, env); // plain data, no app/x402 server (CPU on cold isolates)
+  const fast = browser ? null : fastGuided(req.url, path, env); // plain data, no app/x402 server (CPU on cold isolates)
   if (fast) { if (log) log.fast_402 = true; unpaid402.set(key, fast); return toResponse(fast); }
   const res = await createApp(env).fetch(req, env, ctx);
   if (res.status !== 402) return res;
-  const e = { status: res.status, headers: [...res.headers], body: await res.text() };
+  let e = { status: res.status, headers: [...res.headers], body: await res.text() };
+  if (!browser) e = withGuide(e, path);
   unpaid402.set(key, e);
   return toResponse(e);
+}
+
+// Free discovery documents (GET/HEAD), plain data built once per isolate.
+function discovery(req, env, path) {
+  if (req.method !== "GET" && req.method !== "HEAD") return null;
+  const d = discoveryDocs({ pa: env.PRICE_PA || "$0.005", counterparty: priceCounterparty(env) })[path];
+  if (!d) return null;
+  return new Response(req.method === "HEAD" ? null : d.body, { status: 200, headers: { "content-type": d.type, "cache-control": "public, max-age=3600",
+    "access-control-allow-origin": "*" } });
 }
 
 function route(req, env, ctx, path, log, mcpMsg) {
@@ -60,6 +88,8 @@ function route(req, env, ctx, path, log, mcpMsg) {
     return res;
   });
   if (PAID.test(path)) return paidRoute(req, env, ctx, log);
+  const doc = discovery(req, env, path);
+  if (doc) { if (log) log.doc = true; return doc; }
   freeApp ??= createApp({ ...env, DISABLE_PAYMENTS: "1", FREE_ONLY: "1" });
   return freeApp.fetch(req, env, ctx);
 }

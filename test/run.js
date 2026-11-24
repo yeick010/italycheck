@@ -51,7 +51,9 @@ try { validateBazaarRouteExtensions(createApp.__routes ?? {}); ok("bazaar valida
   const fresh = await snap(await createApp(env).fetch(new Request(U), env));
   const miss = await snap(await paidRoute(new Request(U), env));
   const hit = await snap(await paidRoute(new Request(U), env));
-  ok("402 cache: miss == fresh createApp", JSON.stringify(miss) === JSON.stringify(fresh), `status=${miss.status}`);
+  const { withGuide } = await import("../src/guide402.js");
+  ok("402 cache: miss == fresh createApp (status, headers)", miss.status === fresh.status && JSON.stringify(miss.headers) === JSON.stringify(fresh.headers), `status=${miss.status}`);
+  ok("402 cache: miss body == library body \"{}\" + readable guide", fresh.body === "{}" && miss.body === withGuide(fresh, "/v1/pa").body && JSON.parse(miss.body).howToPay?.protocol === "x402 v2 (exact scheme)");
   ok("402 cache: hit == miss (status, headers, body)", JSON.stringify(hit) === JSON.stringify(miss) && unpaid402.size === 1);
   const prj = JSON.parse(Buffer.from(new Headers(hit.headers).get("payment-required"), "base64").toString());
   // Live read-only check: the static fast 402 must match what production serves today (same mainnet env as wrangler.toml).

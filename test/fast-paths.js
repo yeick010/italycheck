@@ -42,7 +42,9 @@ ok("fast 402 declines VAT-enabled / free / unknown network / unparseable price",
   const env = { X402_NETWORK: "eip155:8453" }, log = {};
   const r = await snap(await paidRoute(new Request(PA), env, log));
   const lib = await snap(await createApp(env).fetch(new Request(PA), env));
-  ok("paidRoute uses fast 402 (non-browser) and equals library", same(r, lib) && unpaid402.size === 1);
+  const { withGuide } = await import("../src/guide402.js");
+  ok("paidRoute uses fast 402 (non-browser) and equals library + readable body", r.status === lib.status && same(r.headers, lib.headers)
+    && lib.body === "{}" && r.body === withGuide(lib, "/v1/pa").body && unpaid402.size === 1);
   const b = await paidRoute(new Request(PA, { headers: { accept: "text/html", "user-agent": "Mozilla/5.0" } }), env);
   ok("browser paywall still goes through the library", (b.headers.get("content-type") || "").includes("text/html")); }
 
@@ -144,7 +146,9 @@ await cmp("prompts/list (not supported, now fast -32601)", { jsonrpc: "2.0", id:
     const u = "https://italycheck.example" + path, log = {};
     const fast = await snap(await paidRoute(new Request(u, { method: "POST", body: "{}" }), env, {}, log));
     const lib = await snap(await createApp(env).fetch(new Request(u, { method: "POST", body: "{}" }), env));
-    ok(`POST ${path.split("?")[0]} -> fast 404 == library`, same(fast, lib) && log.fast_404 === true, JSON.stringify(fast).slice(0, 160));
+    const fj = JSON.parse(fast.body);
+    ok(`POST ${path.split("?")[0]} -> 405 Allow: GET, HEAD with the GET to use (library: 404), no paid app`, lib.status === 404 && fast.status === 405
+      && new Headers(fast.headers).get("allow") === "GET, HEAD" && fj.error === "method_not_allowed" && fj.message.includes("GET " + path.split("?")[0]) && log.fast_405 === true, JSON.stringify(fast).slice(0, 160));
   }
 }
 
@@ -161,7 +165,9 @@ await cmp("prompts/list (not supported, now fast -32601)", { jsonrpc: "2.0", id:
     const l = logs.at(-1);
     ok("worker SDK-path request logs its shape (pv, param keys, id type)", b.status === 200 && l.mcp_sdk === true && l.mcp_pv === "2025-06-18" && l.mcp_params === "name,arguments" && l.mcp_id_type === "number", JSON.stringify(l));
     const p = await worker.fetch(new Request("https://italycheck.example/v1/pa?cf=80016350821", { method: "POST" }), env, {});
-    ok("worker POST /v1/pa -> 404 fast", p.status === 404 && logs.at(-1).fast_404 === true);
+    ok("worker POST /v1/pa -> 405 fast", p.status === 405 && logs.at(-1).fast_405 === true);
+    const v = await worker.fetch(new Request("https://italycheck.example/v1/vat", { method: "POST" }), env, {});
+    ok("worker POST /v1/vat (not served) -> 404 fast", v.status === 404 && logs.at(-1).fast_404 === true);
   } finally { console.log = orig; } }
 
 // ── Revenue state from on-chain logs (mock RPC) ──

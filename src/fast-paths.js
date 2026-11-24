@@ -67,12 +67,14 @@ export const MCP_SERVER_INFO = { name: "italycheck", version: "0.2.0" };
 export const TOOL_FORMAT = { name: "check_partita_iva_format",
   description: "Free offline check of an Italian partita IVA (11 digits + check digit). Does not confirm registration.",
   arg: "piva", argDescription: "Italian partita IVA, e.g. 00743110157" };
+// How to pay, appended to both paid tool descriptions (seen by MCP clients and directories in tools/list).
+const PAY_HINT = ' Unpaid calls return the x402 v2 payment requirements (isError, not charged); pay per call with an x402 MCP client (payment in params._meta["x402/payment"], e.g. @x402/mcp). Docs: https://github.com/yeick010/italycheck';
 export const paToolDescription = env => DESCRIPTIONS.pa.replace(" Input: ?cf=80016350821.", "") +
-  ` Costs ${env.PRICE_PA || "$0.005"} in USDC (or ${(env.PRICE_PA || "$0.005").replace("$", "")} EURC) on Base via x402.`;
+  ` Costs ${env.PRICE_PA || "$0.005"} in USDC (or ${(env.PRICE_PA || "$0.005").replace("$", "")} EURC) on Base via x402.` + PAY_HINT;
 export const PA_ARG_DESCRIPTION = "11-digit codice fiscale, e.g. 80016350821";
 export const COUNTERPARTY_TOOL = "verify_italian_counterparty";
 export const counterpartyToolDescription = env => DESCRIPTIONS.counterparty.replace(" Input: ?id=80016350821.", "") +
-  ` Costs ${priceCounterparty(env)} in USDC (or ${priceCounterparty(env).replace("$", "")} EURC) on Base via x402.`;
+  ` Costs ${priceCounterparty(env)} in USDC (or ${priceCounterparty(env).replace("$", "")} EURC) on Base via x402.` + PAY_HINT;
 export const COUNTERPARTY_ARG_DESCRIPTION = "Italian partita IVA or numeric codice fiscale (11 digits, optional IT prefix), e.g. 80016350821";
 // Paid MCP tools: name -> argument name (both answered from the cached payment-required result when unpaid).
 export const PAID_TOOLS = { lookup_italian_pa: "cf", [COUNTERPARTY_TOOL]: "id" };

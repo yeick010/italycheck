@@ -48,3 +48,11 @@ Verifica fornitori pagata a chiamata dagli agenti AI. Solo fonti pubbliche gratu
 - Il facilitator CDP accetta ogni ERC-20 con EIP-3009 (USDC, EURC) sulle sue reti EVM: https://docs.cdp.coinbase.com/x402/support/faq
 - Nota per chi compra: i client `@x402` 2.28 con `spendControls` predefiniti accettano solo gli asset predefiniti (USDC). Per pagare in EURC servono `spendControls.allowedAssets` con EURC, oppure `allowedAssets: true`.
 - Per disattivare EURC: variabile `DISABLE_EURC="1"`.
+
+## Risposta 402 leggibile e discovery (24/11/2026)
+- Analisi 7 giorni (17–24/11): 4.810 risposte 402, tutte su `GET /v1/pa`; il corpo JSON era `{}` e tutto stava solo nell'header base64 `PAYMENT-REQUIRED`. ~1.500 richieste a `/.well-known/x402`, `/openapi.json`, `/llms.txt` finivano in 404; 137 `POST /v1/pa` in 404.
+- Ora il corpo del 402 JSON ripete l'oggetto `PAYMENT-REQUIRED` decodificato (header e `accepts` invariati) e aggiunge `message` e `howToPay`: prezzo, asset, rete, header `PAYMENT-SIGNATURE`, esempio `@x402/fetch`, regola di addebito, link alla documentazione. Con `X-PAYMENT` (v1) arriva anche un `hint`.
+- `POST`/altri metodi su `/v1/pa` e `/v1/counterparty` senza pagamento: 405 `Allow: GET, HEAD` con la GET da usare.
+- Nuovi documenti gratuiti: `/.well-known/x402` (formato x402scan, senza ownershipProofs), `/openapi.json` (con `x-payment-info`), `/llms.txt`.
+- HEAD resta 402 senza corpo, senza lookup e senza addebito. Prezzi, wallet, termini e `wrangler.toml` invariati.
+- Smoke: `SMOKE_GUIDE_INFO=1` (o `PRE_SMOKE_GUIDE_INFO=1` per lo script di deploy) per versioni precedenti.

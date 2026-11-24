@@ -24,8 +24,9 @@ echo "tests: $(grep -c '^PASS' /tmp/italycheck-deploy-tests.log) PASS, $(grep -c
 rm -rf /tmp/italycheck-dryrun && W deploy --dry-run --outdir /tmp/italycheck-dryrun > /dev/null || { echo "ABORT: bundle build failed"; exit 1; }
 LIVE=$(live_version)
 [ "$LIVE" = "$ROLLBACK" ] || { echo "ABORT: live version is $LIVE, not $ROLLBACK (pass the current live version)"; exit 1; }
-PRE_ENV="SMOKE_HEAD_INFO=${PRE_SMOKE_HEAD_INFO:-0}"  # PRE_SMOKE_HEAD_INFO=1 when the live version predates the HEAD 402 fix
-env "$PRE_ENV" node scripts/smoke.mjs "$BASE" > /tmp/italycheck-presmoke.log 2>&1 || { sleep 10; env "$PRE_ENV" node scripts/smoke.mjs "$BASE" > /tmp/italycheck-presmoke.log 2>&1; } || { grep FAIL /tmp/italycheck-presmoke.log; echo "ABORT: smoke failing on the live version $LIVE (twice)"; exit 1; }
+# PRE_SMOKE_HEAD_INFO=1 / PRE_SMOKE_GUIDE_INFO=1 when the live (rollback) version predates the HEAD 402 fix / the readable 402 (24/11/2026)
+PRE_ENV=("SMOKE_HEAD_INFO=${PRE_SMOKE_HEAD_INFO:-0}" "SMOKE_GUIDE_INFO=${PRE_SMOKE_GUIDE_INFO:-0}")
+env "${PRE_ENV[@]}" node scripts/smoke.mjs "$BASE" > /tmp/italycheck-presmoke.log 2>&1 || { sleep 10; env "${PRE_ENV[@]}" node scripts/smoke.mjs "$BASE" > /tmp/italycheck-presmoke.log 2>&1; } || { grep FAIL /tmp/italycheck-presmoke.log; echo "ABORT: smoke failing on the live version $LIVE (twice)"; exit 1; }
 
 [ "${DRY_RUN:-}" = 1 ] && { echo "DRY_RUN: preflight OK, live $LIVE, not deploying"; exit 0; }
 echo "== deploy $HEAD (rollback target $ROLLBACK)"
@@ -43,5 +44,5 @@ fi
 echo "== ROLLBACK to $ROLLBACK (smoke=$okrun new=${NEW:-?} live=$NOWLIVE)"
 W rollback "$ROLLBACK" --message "auto-rollback: smoke failed for $HEAD" --yes
 sleep 15
-env "$PRE_ENV" node scripts/smoke.mjs "$BASE" && echo "ROLLED BACK: $ROLLBACK live again, smoke green" || echo "ROLLED BACK but smoke still failing: check now"
+env "${PRE_ENV[@]}" node scripts/smoke.mjs "$BASE" && echo "ROLLED BACK: $ROLLBACK live again, smoke green" || echo "ROLLED BACK but smoke still failing: check now"
 exit 1
